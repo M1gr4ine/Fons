@@ -74,7 +74,7 @@ export function parseInbox(content) {
   return { rows, activeItems: collectActiveItems(rows) };
 }
 
-function completedText(line) {
+export function completedText(line) {
   if (!isCompletedLine(line) || line.includes('<!-- fons-ack:')) return '';
   return line.replace(COMPLETED_LINE_RE, '').trim();
 }
@@ -89,6 +89,11 @@ function countCompletions(rows, archivedContent) {
   return counts;
 }
 
+export function deliveryId(text, count) {
+  const idInput = count ? text + '\0' + count : text;
+  return hash('sha1', idInput).slice(0, 12);
+}
+
 export function parseActiveItems(content, archivedContent = '') {
   const { rows, activeItems } = parseInbox(content);
   if (activeItems.length === 0) return [];
@@ -97,7 +102,6 @@ export function parseActiveItems(content, archivedContent = '') {
   return activeItems.map(({ text }) => {
     // Keep the delivery ID stable when a completion moves from ideas.md to archive.md.
     const count = completions.get(text);
-    const idInput = count ? text + '\0' + count : text;
-    return { id: hash('sha1', idInput).slice(0, 12), text };
+    return { id: deliveryId(text, count), text };
   });
 }

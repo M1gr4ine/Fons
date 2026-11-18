@@ -1,6 +1,13 @@
 {
   "fons": {
     "enabled": true,
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "scripts\\run-hook.cmd SessionStart",
+        "timeout": 5
+      }
+    ],
     "PreInvocation": [
       {
         "type": "command",

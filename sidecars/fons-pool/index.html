@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>灵感池</title>
+  <script src="/preload.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body { background: var(--background); color: var(--foreground); font: 13px/1.5 var(--font-family, sans-serif); }
+    button, textarea, input { font: inherit; }
+    button { color: inherit; background: transparent; border: 0; cursor: pointer; }
+    button:disabled { opacity: .45; cursor: default; }
+    button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 1px solid var(--primary); outline-offset: 2px; }
+    [hidden] { display: none !important; }
+    .pool { height: 100%; min-width: 0; display: flex; flex-direction: column; }
+    .bar { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+    .bar h1 { font-size: 13px; font-weight: 600; margin: 0 auto 0 0; }
+    .bar button { padding: 3px 4px; }
+    .bar button:not(:disabled):hover, .remove:hover { background: var(--muted); }
+    .countdown, .status { color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
+    .warning, .notice { padding: 7px 12px; overflow-wrap: anywhere; }
+    .warning { color: var(--error); border-bottom: 1px solid var(--border); }
+    .notice { color: var(--muted-foreground); }
+    .list { flex: 1; overflow-y: auto; min-height: 0; padding: 4px 8px; }
+    .row { display: flex; align-items: flex-start; gap: 7px; padding: 5px 4px; min-width: 0; }
+    .row input { margin: 4px 0 0; accent-color: var(--primary); flex: none; }
+    textarea { display: block; width: 100%; min-height: 21px; padding: 0; border: 0; border-radius: 0; resize: none; overflow: hidden; background: transparent; color: var(--foreground); line-height: 1.5; overflow-wrap: anywhere; }
+    textarea::placeholder { color: var(--muted-foreground); }
+    .row textarea { flex: 1; min-width: 0; }
+    .row[data-status="done"] textarea { color: var(--muted-foreground); text-decoration: line-through; }
+    .status { padding-top: 2px; }
+    .remove { padding: 0 4px; color: var(--muted-foreground); font-size: 16px; line-height: 21px; }
+    .quick { display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px; border-top: 1px solid var(--border); }
+    .quick span { color: var(--muted-foreground); line-height: 21px; }
+    .quick textarea { flex: 1; min-width: 0; }
+  </style>
+</head>
+<body>
+  <main class="pool" data-testid="fons-pool">
+    <header class="bar">
+      <h1>灵感池</h1>
+      <span class="countdown" data-testid="fons-countdown" aria-live="polite"></span>
+      <button type="button" data-testid="fons-flush" title="将在下次模型调用时投递">投递</button>
+      <button type="button" data-testid="fons-archive">归档</button>
+    </header>
+    <div class="warning" role="status" hidden></div>
+    <div class="notice" role="status" aria-live="polite" hidden></div>
+    <div class="list" role="list">
+      <div class="empty" data-testid="fons-empty" hidden></div>
+      <div class="rows"></div>
+    </div>
+    <div class="quick"><span aria-hidden="true">＋</span><textarea rows="1" data-testid="fons-quick-add" aria-label="记一条灵感" placeholder="记一条，回车继续…" disabled></textarea></div>
+  </main>
+  <script>
+    (() => {
+      'use strict';
+      const $ = (selector) => document.querySelector(selector);
+      const elements = {
+        rows: $('.rows'), empty: $('.empty'), quick: $('[data-testid="fons-quick-add"]'),
+        countdown: $('[data-testid="fons-countdown"]'), flush: $('[data-testid="fons-flush"]'),
+        archive: $('[data-testid="fons-archive"]'), warning: $('.warning'), notice: $('.notice'),
+      };
+      const state = { id: null, session: 0, epoch: 0, etag: '', registered: false, busy: false, tail: Promise.resolve(), polling: null, refreshNeeded: false, deadline: 0, flushPending: false, workspace: null, workspaceKey: null, boundWorkspaces: new Map() };
+      let noticeTimer;
+      const conversationId = () => window.sidecar?.conversationId || '';
+      const current = (id, epoch) => {
+        syncSession();
+        return state.id === id && state.epoch === epoch;
+      };
+
+      function showNotice(message) {
+        elements.notice.textContent = message;
+        elements.notice.hidden = !message;
+        clearTimeout(noticeTimer);
+        if (message) noticeTimer = setTimeout(() => { elements.notice.hidden = true; }, 3500);
+      }
+
+      function resize(textarea) {
+        textarea.style.height = 'auto';
+        textarea.style.height = `${textarea.scrollHeight}px`;
+      }
+
+      function updateAvailability() {
+        elements.quick.disabled = !state.registered;
+        elements.flush.disabled = !state.registered;
+        if (!state.registered) elements.archive.disabled = true;
+      }
+
+      function showEmpty(message) {
+        elements.empty.textContent = message;
+        elements.empty.hidden = false;
+      }
+
+      function resetPanel() {
+        state.session += 1;
+        state.epoch += 1;
+        state.tail = Promise.resolve();
+        state.etag = '';
+        state.polling = null;
+        state.refreshNeeded = false;
+        state.busy = false;
+        state.deadline = 0;
+        state.flushPending = false;
+        state.registered = false;
+        elements.rows.replaceChildren();
+        elements.quick.value = '';
+        resize(elements.quick);
+        elements.warning.hidden = true;
+        showNotice('');
+        updateAvailability();
+        updateCountdown();
+      }
+
+      function bindWorkspace() {
+        if (state.workspace !== 'open' || !state.id || state.boundWorkspaces.has(state.id)) return;
+        state.boundWorkspaces.set(state.id, state.workspaceKey);
+      }
+
+      function workspaceMismatch() {
+        return state.workspace === 'open' && state.boundWorkspaces.has(state.id) && state.boundWorkspaces.get(state.id) !== state.workspaceKey;
+      }
+
+      function showContext() {
+        if (state.workspace === 'unavailable') showEmpty('无法连接宿主，请在 Antigravity 中打开灵感池。');
+        else if (state.workspace === null) showEmpty('正在等待宿主工作区信息…');
+        else if (state.workspace === 'empty') showEmpty('当前没有打开项目工作区，请先打开项目。');
+        else if (!state.id) showEmpty('无法获取当前会话，请重新打开灵感池。');
+        else if (workspaceMismatch()) showEmpty('工作区已更换，请切换到目标会话或重新打开灵感池。');
+        else showEmpty('正在读取灵感池…');
+      }
+
+      function syncSession() {
+        const next = conversationId();
+        if (next === state.id) return;
+        state.id = next;
+        bindWorkspace();
+        resetPanel();
+        showContext();
+      }
+
+      function workspaceChanged(uris) {
+        const key = JSON.stringify([...uris].sort());
+        if (key === state.workspaceKey) return;
+        state.workspaceKey = key;
+        state.workspace = uris.length ? 'open' : 'empty';
+        bindWorkspace();
+        resetPanel();
+        syncSession();
+        showContext();
+        void poll();
+      }
+
+      async function request(url, options = {}) {
+        if (typeof window.sidecar?.fetch !== 'function') throw new Error('无法连接宿主，请在 Antigravity 中打开灵感池。');
+        const response = await window.sidecar.fetch(url, options);
+        if (!response.ok) {
+          let message = `请求失败（${response.status}）`;
+          try {
+            const data = await response.json();
+            if (typeof data?.error === 'string' && data.error.trim()) message = data.error;
+          } catch (error) {
+            message = `请求失败（${response.status}）`;
+          }
+          const error = new Error(message);
+          error.status = response.status;
+          throw error;
+        }
+        return response.json();
+      }
+
+      function showFailure(error) {
+        const authorizationFailure = error.status === 401 || error.status === 403;
+        if (authorizationFailure) resetPanel();
+        else {
+          state.registered = false;
+          state.etag = '';
+          state.deadline = 0;
+          state.flushPending = false;
+          elements.rows.replaceChildren();
+          elements.warning.hidden = true;
+          showNotice('');
+          updateAvailability();
+          updateCountdown();
+        }
+        showEmpty(error.message || '读取失败，请重试');
+      }
+
+      function updateCountdown() {
+        const seconds = Math.max(0, Math.ceil((state.deadline - Date.now()) / 1000));
+        const remaining = seconds ? `${seconds}s` : '';
+        elements.countdown.textContent = state.flushPending ? '等待下次调用' : remaining;
+      }
+
+      function updateWarning(warning) {
+        elements.warning.textContent = warning?.message || '';
+        elements.warning.hidden = !warning?.message;
+      }
+
+      function rowLabel(status) {
+        return { buffering: '待投递', delivered: '已投递', done: '已完成' }[status] || '';
+      }
+
+      function updateRow(node, item) {
+        node.item = item;
+        node.dataset.token = item.token;
+        node.dataset.status = item.status;
+        node.querySelector('input').checked = item.status === 'done';
+        node.querySelector('.status').textContent = rowLabel(item.status);
+        const input = node.querySelector('textarea');
+        if (document.activeElement !== input && !node.dirty && !node.saving) { input.value = item.text; resize(input); }
+      }
+
+      function itemArguments(node) {
+        return { rowIndex: node.item.rowIndex, expectedRaw: node.item.raw };
+      }
+
+      function validNode(node) {
+        syncSession();
+        return node.isConnected && node.conversation === state.id && node.session === state.session && state.registered;
+      }
+
+      function handleMutationFailure(error, id, epoch) {
+        if (!current(id, epoch)) return;
+        if (error.status === 401 || error.status === 403) showFailure(error);
+        else showNotice(error.message || '操作失败，请重试');
+      }
+
+      async function mutate(action, fields, id = state.id, onResult = () => {}) {
+        syncSession();
+        if (!id || state.id !== id || !state.registered) return null;
+        const session = state.session;
+        const previous = state.tail;
+        let release;
+        state.tail = new Promise((resolve) => { release = resolve; });
+        await previous;
+        syncSession();
+        if (id !== state.id || session !== state.session || !state.registered) { release(); return null; }
+        state.busy = true;
+        state.epoch += 1;
+        state.polling = null;
+        const epoch = state.epoch;
+        let result;
+        try {
+          const payload = typeof fields === 'function' ? fields() : fields;
+          if (!payload) return null;
+          result = await request(`/api/pool/${action}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conversationId: id, ...payload }),
+          });
+          if (!current(id, epoch)) return null;
+          if (result.conflict) showNotice('内容已被修改');
+          onResult(result);
+          state.etag = '';
+        } catch (error) {
+          handleMutationFailure(error, id, epoch);
+          return null;
+        } finally {
+          try { if (current(id, epoch)) { state.busy = false; await poll(); } }
+          finally { release(); }
+        }
+        syncSession();
+        return id === state.id && session === state.session ? result : null;
+      }
+      function saveRow(node) {
+        if (node.saving) return node.saving;
+        if (!validNode(node)) return Promise.resolve(null);
+        const value = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
+        if (value === node.item.text) { node.dirty = false; return Promise.resolve({ conflict: false }); }
+        if (!value) { showNotice('灵感内容不能为空'); return Promise.resolve(null); }
+        const id = node.conversation;
+        node.saving = mutate('update', () => validNode(node) ? { ...itemArguments(node), newText: value } : null, id, (result) => {
+          node.refreshValue = result.conflict ? null : value;
+          node.conflicted = !!result.conflict;
+          node.dirty = !result.conflict && node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim() !== value;
+        }).then((result) => {
+          node.saving = null;
+          if (result && !result.conflict && node.dirty && document.activeElement !== node.querySelector('textarea') && validNode(node)) {
+            queueMicrotask(() => { void saveRow(node); });
+          }
+          return result;
+        });
+        return node.saving;
+      }
+
+      function restoreCheck(node) {
+        if (validNode(node)) node.querySelector('input').checked = node.item.status === 'done';
+      }
+
+      async function changeCheck(node) {
+        if (!validNode(node)) return;
+        const saved = await saveRow(node);
+        if (!saved || saved.conflict || !validNode(node)) { restoreCheck(node); return; }
+        const action = node.item.status === 'done' ? 'reopen' : 'complete';
+        const fields = () => {
+          if (!validNode(node)) return null;
+          return action === 'complete' ? { token: node.item.token } : itemArguments(node);
+        };
+        const result = await mutate(action, fields, node.conversation);
+        if (!result || result.conflict) restoreCheck(node);
+      }
+
+      async function deleteRow(node) {
+        if (!validNode(node)) return;
+        const saved = await saveRow(node);
+        if (!saved || saved.conflict || !validNode(node)) return;
+        if (node.item.status === 'delivered' && !window.confirm('模型已收到该条，将发送撤回通知')) return;
+        if (!validNode(node)) return;
+        await mutate('remove', () => validNode(node) ? itemArguments(node) : null, node.conversation);
+      }
+
+      function onRowKey(event, node) {
+        if (event.isComposing || event.keyCode === 229 || event.key !== 'Enter') return;
+        event.preventDefault();
+        const index = [...elements.rows.children].indexOf(node);
+        const id = node.conversation;
+        void saveRow(node).then((result) => {
+          if (!result || result.conflict || id !== conversationId() || !validNode(node)) return;
+          const next = elements.rows.children[index + 1]?.querySelector('textarea') || elements.quick;
+          next.focus();
+        });
+      }
+
+      function pasteSingleLine(event) {
+        const text = event.clipboardData.getData('text');
+        if (!/[\r\n]/.test(text)) return;
+        event.preventDefault();
+        const input = event.currentTarget;
+        input.setRangeText(text.replace(/[\r\n]+/g, ' '), input.selectionStart, input.selectionEnd, 'end');
+        input.closest('.row').dirty = true;
+        resize(input);
+      }
+
+      function createRow(item) {
+        const node = document.createElement('div');
+        node.className = 'row';
+        node.dataset.testid = 'fons-row';
+        node.setAttribute('role', 'listitem');
+        node.conversation = state.id;
+        node.session = state.session;
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.dataset.testid = 'fons-check';
+        check.setAttribute('aria-label', '标记完成');
+        const input = document.createElement('textarea');
+        input.rows = 1;
+        input.dataset.testid = 'fons-input';
+        input.setAttribute('aria-label', '灵感内容');
+        const status = document.createElement('span');
+        status.className = 'status';
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'remove';
+        remove.textContent = '×';
+        remove.setAttribute('aria-label', '删除灵感');
+        node.append(check, input, status, remove);
+        check.addEventListener('change', () => { void changeCheck(node); });
+        input.addEventListener('input', () => { node.dirty = true; resize(input); });
+        input.addEventListener('blur', () => {
+          state.etag = '';
+          state.refreshNeeded = true;
+          void saveRow(node).then(() => poll());
+        });
+        input.addEventListener('keydown', (event) => onRowKey(event, node));
+        input.addEventListener('paste', pasteSingleLine);
+        remove.addEventListener('click', () => { void deleteRow(node); });
+        updateRow(node, item);
+        return node;
+      }
+
+      function refreshActiveRow(node, item) {
+        if (node.refreshValue !== item.text && node.item.text !== item.text && !node.conflicted) return;
+        updateRow(node, item);
+        if (node.conflicted) {
+          const input = node.querySelector('textarea');
+          input.value = item.text;
+          node.dirty = false;
+          resize(input);
+        }
+        node.refreshValue = null;
+        node.conflicted = false;
+      }
+
+      function reconcile(items) {
+        const active = document.activeElement?.closest?.('.row');
+        const nodes = [...elements.rows.children];
+        const existing = new Map(nodes.map((node) => [node.dataset.token, node]));
+        const protectedRows = nodes.filter((node) => node === active || node.dirty || node.saving);
+        const keep = new Set();
+        let position = 0;
+        for (const item of items) {
+          const protectedNode = protectedRows.find((node) => node.item.rowIndex === item.rowIndex);
+          if (protectedNode && protectedNode.dataset.token !== item.token) {
+            refreshActiveRow(protectedNode, item);
+            keep.add(protectedNode);
+            position += 1;
+            continue;
+          }
+          const node = existing.get(item.token) || createRow(item);
+          updateRow(node, item);
+          keep.add(node);
+          const anchor = elements.rows.children[position];
+          if (node !== active && node !== anchor) elements.rows.insertBefore(node, anchor || null);
+          resize(node.querySelector('textarea'));
+          position += 1;
+        }
+        for (const node of [...elements.rows.children]) {
+          if (!keep.has(node) && (node.conflicted || !protectedRows.includes(node))) node.remove();
+        }
+      }
+      function applySnapshot(data) {
+        state.registered = data.registered;
+        updateAvailability();
+        updateWarning(data.migrationWarning);
+        elements.empty.hidden = data.registered && data.items.length > 0;
+        elements.empty.textContent = data.registered ? '还没有灵感，随时记一条。' : '当前会话尚未登记，请确认项目已挂载 Fons；旧会话请新开会话或参照 README 登记。';
+        if (!data.registered) {
+          elements.rows.replaceChildren();
+          state.etag = '';
+          state.deadline = 0;
+          state.flushPending = false;
+          updateCountdown();
+          return;
+        }
+        state.etag = data.etag;
+        state.deadline = Date.now() + Math.max(0, data.debounceRemainingMs || 0);
+        state.flushPending = !!data.flushPending;
+        elements.archive.disabled = !data.canArchive;
+        reconcile(data.items);
+        updateCountdown();
+      }
+
+      async function poll() {
+        syncSession();
+        if (document.hidden || state.workspace !== 'open' || workspaceMismatch() || !state.id || state.polling || state.busy) return;
+        const id = state.id;
+        const epoch = state.epoch;
+        const ticket = { id, epoch };
+        state.polling = ticket;
+        state.refreshNeeded = false;
+        const payload = { conversationId: id };
+        if (state.etag) payload.etag = state.etag;
+        try {
+          const data = await request('/api/pool', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (current(id, epoch) && state.polling === ticket && !data.unchanged) applySnapshot(data);
+        } catch (error) {
+          if (current(id, epoch) && state.polling === ticket) showFailure(error);
+        } finally {
+          if (state.polling === ticket) {
+            state.polling = null;
+            if (state.refreshNeeded && !state.busy) { state.etag = ''; void poll(); }
+          }
+        }
+      }
+      async function addTexts(texts, expectedValue) {
+        syncSession();
+        const id = state.id;
+        const session = state.session;
+        if (!texts.length || !state.registered) return;
+        elements.quick.value = '';
+        resize(elements.quick);
+        const result = await mutate('add', { texts }, id);
+        if (session !== state.session || id !== conversationId()) return;
+        if (!result) {
+          elements.quick.value = [expectedValue, elements.quick.value].filter(Boolean).join('\n');
+          resize(elements.quick);
+        }
+      }
+
+      elements.quick.addEventListener('input', () => resize(elements.quick));
+      elements.quick.addEventListener('keydown', (event) => {
+        if (event.isComposing || event.keyCode === 229 || event.key !== 'Enter') return;
+        event.preventDefault();
+        const value = elements.quick.value;
+        void addTexts(value.split(/\r?\n/).map((text) => text.trim()).filter(Boolean), value);
+      });
+      elements.quick.addEventListener('paste', (event) => {
+        const text = event.clipboardData.getData('text');
+        if (!/[\r\n]/.test(text)) return;
+        event.preventDefault();
+        const input = elements.quick;
+        input.setRangeText(text, input.selectionStart, input.selectionEnd, 'end');
+        const value = input.value;
+        resize(input);
+        void addTexts(value.split(/\r\n|\r|\n/).map((line) => line.trim()).filter(Boolean), value);
+      });
+      elements.flush.addEventListener('click', () => { void mutate('flush', {}).then((result) => { if (result) showNotice('将在下次模型调用时投递'); }); });
+      elements.archive.addEventListener('click', () => { void mutate('archive', {}); });
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(); });
+      if (typeof ResizeObserver !== 'undefined') {
+        const observer = new ResizeObserver(() => {
+          for (const textarea of document.querySelectorAll('textarea')) resize(textarea);
+        });
+        observer.observe(document.querySelector('.pool'));
+      }
+      setInterval(() => { syncSession(); updateCountdown(); void poll(); }, 1500);
+      syncSession();
+      if (typeof window.sidecar?.onWorkspaceChange === 'function' && typeof window.sidecar?.fetch === 'function') {
+        window.sidecar.onWorkspaceChange(workspaceChanged);
+      } else {
+        state.workspace = 'unavailable';
+        showContext();
+      }
+    })();
+  </script>
+</body>
+</html>

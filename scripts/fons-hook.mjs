@@ -2,17 +2,20 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { COMPLETED_PREFIX, parseActiveItems } from "./fons-inbox.mjs";
+import {
+  computeDebounce, findAppData, isValidSessionId, migrateLegacyInbox,
+  readJson, readPoolData, registerConversation, sessionPaths, writeJsonAtomic,
+} from "./fons-store.mjs";
 
 const MAX_STOP_CONTINUES = 2;
 const ACK_LINE = /(?:^|\r?\n)\[FONS_ACK:[ \t]*([a-f0-9]{16}(?:,[ \t]*[a-f0-9]{16})*)\][ \t]*$/;
-const HANDLING_INSTRUCTIONS =
-  '有写权限时，处理后用 edit_file 仅将 ideas.md 对应行的前缀改为 "' + COMPLETED_PREFIX +
-  '"，禁止用 write_file 整文件覆盖。' +
+function handlingInstructions(ideasPath) {
+  return `有写权限时，处理后用 edit_file 仅将本会话收件箱 ${ideasPath} 对应行的前缀改为 "【√】 "，禁止用 write_file 整文件覆盖。` +
   '若处于只读 Plan 模式且任务无需写文件，请勿为勾选调用 exit_plan_mode。直接回答补充项，' +
   '并在回复最后一行用 [FONS_ACK: 编号] 确认已回答的条目。' +
   '使用各条目 [FONS:编号] 内的真实编号，多条以英文逗号分隔。' +
   '仅确认实际回答的条目，不要建议批量勾选。';
+}
 
 function tryParseJson(line) {
   try {
@@ -73,145 +76,133 @@ function readTurnAcknowledgments(transcriptPath) {
   return new Set(match?.[1].split(/,[ \t]*/));
 }
 
-function resolveDebounceMs() {
-  const raw = process.env.FONS_DEBOUNCE_SEC;
-  if (raw === undefined || raw.trim() === "") return 60_000;
-  const sec = Number(raw);
-  return (Number.isFinite(sec) && sec >= 0 ? sec : 60) * 1000;
-}
-
-function readState(statePath) {
-  if (!fs.existsSync(statePath)) return {};
-  try {
-    const parsed = JSON.parse(fs.readFileSync(statePath, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch (err) {
-    // 状态文件属于可重建缓存，解析或 I/O 失败时重置以免阻塞每次模型调用
-    if (err instanceof SyntaxError || err?.code) return {};
-    throw err;
-  }
-}
-
-function getConvState(allState, convId) {
-  const convState = (allState[convId] ??= {});
-  convState.delivered ??= {};
-  convState.acknowledged ??= {};
-  convState.lastStopSig ??= "";
-  convState.stopCount ??= 0;
-  return convState;
-}
-
-function markDelivered(items, convState) {
-  const deliveredAt = Date.now();
+function markDelivered(items, { state, ui }) {
+  state.delivered ??= {};
   return items.map(({ id, text }, index) => {
     const ackToken = crypto.randomBytes(8).toString("hex");
-    convState.delivered[id] = { text, deliveredAt, ackToken };
-    return (index + 1) + ". " + text + " [FONS:" + ackToken + "]";
+    const withdrawn = ui.retracted?.[id];
+    const deliveredAt = Math.max(Date.now(), (ui.reopened?.[id] ?? 0) + 1, (withdrawn?.ts ?? 0) + 1);
+    state.delivered[id] = { text, deliveredAt, ackToken };
+    const label = withdrawn ? `${text}（重新添加）` : text;
+    return `${index + 1}. ${label} [FONS:${ackToken}]`;
   }).join("\n");
 }
 
-function handlePreInvocation({ activeItems, stat, debounceMs, convState, saveState }) {
-  // debounceMs === 0 时跳过时间差判定，避免 NTFS 亚毫秒级舍入误拦
-  if (debounceMs > 0 && Date.now() - stat.mtimeMs < debounceMs) return {};
-
-  const pending = activeItems.filter(({ id }) => !convState.delivered[id]);
-  if (pending.length === 0) return {};
-
-  const numbered = markDelivered(pending, convState);
-  saveState();
-
-  const systemMessage =
-    "[FONS] 以下是用户的非紧急补充。请先完成当前编辑和验证，再统一处理。\n" +
-    HANDLING_INSTRUCTIONS + "\n" + numbered;
-  return { injectSteps: [{ systemMessage: { systemMessage } }] };
+function unnotified(ui, state) {
+  return Object.entries(ui.retracted ?? {}).filter(([id, entry]) => (state.retractNotified?.[id] ?? -1) < entry.ts);
 }
 
-function recordAcknowledgments(items, convState, transcriptPath) {
+function collectRetractions({ state, ui }) {
+  const retracted = unnotified(ui, state);
+  if (!retracted.length) return "";
+  state.retractNotified ??= {};
+  for (const [id, entry] of retracted) state.retractNotified[id] = entry.ts;
+  return "[FONS 撤回] 用户已撤回以下补充，若尚未执行请跳过：\n" +
+    retracted.map(([, entry]) => entry.text).join("\n");
+}
+
+function clearRetractionMarker({ paths, state }) {
+  if (!fs.existsSync(paths.retractMarker)) return;
+  fs.rmSync(paths.retractMarker, { force: true });
+  // A panel can enqueue another withdrawal while this invocation publishes its ledger.
+  if (unnotified(readJson(paths.ui), state).length) fs.closeSync(fs.openSync(paths.retractMarker, "a"));
+}
+
+function handlePreInvocation(data) {
+  const { pending, sig, pendingSigAt, debounceRemainingMs } = computeDebounce(data);
+  const { state, paths } = data;
+  const messages = [];
+  if (pending.length || state.pendingSig !== undefined) {
+    state.pendingSig = sig;
+    state.pendingSigAt = pendingSigAt;
+  }
+  if (pending.length && debounceRemainingMs <= 0) {
+    const numbered = markDelivered(pending, data);
+    messages.push("[FONS] 以下是用户的非紧急补充。请先完成当前编辑和验证，再统一处理。\n" +
+      handlingInstructions(paths.ideas) + "\n" + numbered);
+    state.pendingSig = computeDebounce({ ...data, items: [] }).sig;
+  }
+  const retracted = collectRetractions(data);
+  if (retracted) messages.unshift(retracted);
+  if (!messages.length) return {};
+  return { injectSteps: [{ systemMessage: { systemMessage: messages.join("\n\n") } }] };
+}
+
+function stillUnconfirmed(items, data, transcriptPath) {
   const tokens = readTurnAcknowledgments(transcriptPath);
-  const confirmed = items.filter(({ id }) => tokens.has(convState.delivered[id]?.ackToken));
-  for (const { id } of confirmed) convState.acknowledged[id] = true;
-  return confirmed.length > 0;
+  const remaining = [];
+  for (const item of items) {
+    const delivery = data.state.delivered?.[item.id];
+    const reopened = data.ui.reopened?.[item.id] ?? -1;
+    if (item.status !== "delivered" || !tokens.has(delivery?.ackToken) || delivery.deliveredAt <= reopened) {
+      remaining.push(item);
+      continue;
+    }
+    data.state.acknowledged ??= {};
+    data.state.acknowledged[item.id] = { at: Math.max(Date.now(), reopened + 1) };
+  }
+  return remaining;
 }
 
-function handleStop({ input, activeItems, convState, saveState }) {
-  if (input.terminationReason !== "NO_TOOL_CALL" || input.fullyIdle === false) {
+function handleStop(input, data) {
+  const { state, ui, items } = data;
+  const open = items.filter((item) => item.status !== "done");
+  if (!open.length) return { decision: "allow" };
+  const distinct = new Map(open.map((item) => [item.id, item]));
+  const remaining = stillUnconfirmed(distinct.values(), data, input.transcriptPath);
+  if (!remaining.length) return { decision: "allow" };
+
+  const signature = remaining.map(({ id }) => {
+    const withdrawn = ui.retracted?.[id];
+    return withdrawn ? `${id}@${withdrawn.ts}` : id;
+  }).sort().join(",");
+  const previousCount = state.stopCount ?? 0;
+  const count = input.continuationActive ? previousCount : 0;
+  if (count >= MAX_STOP_CONTINUES || (input.continuationActive && state.lastStopSig === signature)) {
     return { decision: "allow" };
   }
-
-  const unconfirmed = activeItems.filter(({ id }) => !convState.acknowledged[id]);
-  if (unconfirmed.length === 0) return { decision: "allow" };
-
-  if (recordAcknowledgments(unconfirmed, convState, input.transcriptPath)) saveState();
-  const remaining = unconfirmed.filter(({ id }) => !convState.acknowledged[id]);
-  if (remaining.length === 0) return { decision: "allow" };
-
-  const currentSig = remaining.map(({ id }) => id).sort().join(",");
-  if (!input.continuationActive) convState.stopCount = 0;
-  if (
-    (input.continuationActive && convState.lastStopSig === currentSig) ||
-    convState.stopCount >= MAX_STOP_CONTINUES
-  ) {
-    return { decision: "allow" };
-  }
-
-  const numbered = markDelivered(remaining, convState);
-  convState.lastStopSig = currentSig;
-  convState.stopCount += 1;
-  saveState();
-
-  return {
-    decision: "continue",
-    reason: "[FONS 收尾核对] 以下补充条目仍需回应或标记完成。\n" +
-      HANDLING_INSTRUCTIONS + "\n" + numbered,
-  };
+  state.lastStopSig = signature;
+  state.stopCount = count + 1;
+  const numbered = markDelivered(remaining, data);
+  state.pendingSig = computeDebounce({ ...data, items: [] }).sig;
+  const reminder = "[FONS 收尾核对] 以下补充条目仍需回应或标记完成。\n" +
+    handlingInstructions(data.paths.ideas) + "\n" + numbered;
+  const reason = [collectRetractions(data), reminder].filter(Boolean).join("\n\n");
+  return { decision: "continue", reason };
 }
 
-function readArchive(fonsDir) {
-  try {
-    return fs.readFileSync(path.join(fonsDir, "archive.md"), "utf8");
-  } catch (err) {
-    if (err?.code === "ENOENT") return "";
-    throw err;
-  }
+function registerSession(input, context) {
+  const appData = findAppData(input.transcriptPath, "brain");
+  if (appData) registerConversation({ ...context, appData, title: input.lastUserInput });
+}
+
+function handleSessionEvent(input, context, fallback) {
+  const paths = sessionPaths(context);
+  if (fs.existsSync(path.join(paths.fonsDir, "ideas.md"))) migrateLegacyInbox(context);
+  const event = input.hookEventName;
+  if (event !== "Stop") registerSession(input, context);
+  if (event === "SessionStart") return fallback;
+  const inbox = fs.statSync(paths.ideas, { throwIfNoEntry: false });
+  const retraction = event === "PreInvocation" && fs.existsSync(paths.retractMarker);
+  if (!inbox?.size && !retraction) return fallback;
+
+  const data = readPoolData(context);
+  const before = JSON.stringify(data.state);
+  const result = event === "Stop" ? handleStop(input, data) : handlePreInvocation(data);
+  if (JSON.stringify(data.state) !== before) writeJsonAtomic(paths.state, data.state);
+  if (retraction || result.decision === "continue") clearRetractionMarker(data);
+  return result;
 }
 
 function evaluateHook(input) {
   const event = input.hookEventName;
-  const defaultRes = event === "Stop" ? { decision: "allow" } : {};
+  const fallback = event === "Stop" ? { decision: "allow" } : {};
+  if (!["PreInvocation", "SessionStart", "Stop"].includes(event)) return fallback;
+  if (input.workspacePaths?.length === 0) return fallback;
   const rootDir = input.cwd || input.workspacePaths?.[0];
-  if (!rootDir) return defaultRes;
-
-  const fonsDir = path.join(rootDir, ".agents", "fons");
-  const ideasPath = path.join(fonsDir, "ideas.md");
-  if (!fs.existsSync(ideasPath)) return defaultRes;
-
-  const stat = fs.statSync(ideasPath);
-  if (stat.size === 0) return defaultRes;
-
-  const activeItems = parseActiveItems(fs.readFileSync(ideasPath, "utf8"), readArchive(fonsDir));
-  if (activeItems.length === 0) return defaultRes;
-
-  const statePath = path.join(fonsDir, ".state.json");
-  const allState = readState(statePath);
-  const convState = getConvState(allState, input.conversationId || "default");
-  const saveState = () => {
-    fs.mkdirSync(fonsDir, { recursive: true });
-    fs.writeFileSync(statePath, JSON.stringify(allState, null, 2), "utf8");
-  };
-
-  if (event === "PreInvocation") {
-    return handlePreInvocation({
-      activeItems,
-      stat,
-      debounceMs: resolveDebounceMs(),
-      convState,
-      saveState,
-    });
-  }
-  if (event === "Stop") {
-    return handleStop({ input, activeItems, convState, saveState });
-  }
-  return defaultRes;
+  if (!rootDir || !isValidSessionId(input.conversationId)) return fallback;
+  if (event === "Stop" && (input.terminationReason !== "NO_TOOL_CALL" || input.fullyIdle === false)) return fallback;
+  return handleSessionEvent(input, { rootDir: path.resolve(rootDir), sessionId: input.conversationId }, fallback);
 }
 
 function main() {
