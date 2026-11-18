@@ -1,0 +1,19 @@
+{
+  "fons": {
+    "enabled": true,
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "scripts\\run-hook.cmd PreInvocation",
+        "timeout": 5
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "scripts\\run-hook.cmd Stop",
+        "timeout": 5
+      }
+    ]
+  }
+}
