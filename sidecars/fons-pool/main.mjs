@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   addIdeas, archiveCompleted, completeIdea, findAppData, getMigrationWarning,
-  isValidSessionId, lookupConversation, readPoolSnapshot, removeIdea, reopenIdea,
-  requestFlush, updateIdeaText,
+  holdEditing, isValidSessionId, lookupConversation, readPoolSnapshot, releaseEditing,
+  removeIdea, reopenIdea, stampPoolTimers, updateIdeaText,
 } from '../../scripts/fons-store.mjs';
 
 const page = new URL('./index.html', import.meta.url);
@@ -14,8 +14,9 @@ const operations = {
   update: [updateIdeaText, [...rowFields, 'newText']],
   remove: [removeIdea, rowFields],
   reopen: [reopenIdea, rowFields],
-  flush: [requestFlush, []],
   archive: [archiveCompleted, []],
+  hold: [holdEditing, ['id']],
+  release: [releaseEditing, ['id']],
 };
 
 function jsonError(status, error) {
@@ -23,6 +24,7 @@ function jsonError(status, error) {
 }
 
 const valid = {
+  id: (v) => typeof v === 'string' && /^[a-f0-9]{12}$/.test(v),
   rowIndex: (v) => Number.isSafeInteger(v) && v >= 0,
   expectedRaw: (v) => typeof v === 'string',
   newText: (v) => typeof v === 'string' && v.trim().length > 0,
@@ -30,7 +32,15 @@ const valid = {
   texts: (v) => Array.isArray(v) && v.every((s) => typeof s === 'string'),
 };
 
+function freshTimerTexts(result) {
+  if (!result || result.conflict) return [];
+  if (Array.isArray(result.texts)) return result.texts;
+  const single = result.updatedText || result.reopenedText;
+  return single ? [single] : [];
+}
+
 function readPool(context, { etag: previous }) {
+  stampPoolTimers(context);
   const snapshot = readPoolSnapshot(context);
   const warning = getMigrationWarning(context);
   const etag = warning ? snapshot.etag + '|' + warning.status : snapshot.etag;
@@ -47,7 +57,11 @@ function mutate(operation, fields) {
       options[field] = data[field];
     }
     try {
-      return operation(options);
+      const result = operation(options);
+      if (operation !== holdEditing && operation !== releaseEditing) {
+        stampPoolTimers({ ...context, freshTexts: freshTimerTexts(result) });
+      }
+      return result;
     } catch (error) {
       if (error.code === 'FONS_STALE_TOKEN') return { conflict: true };
       throw error;
@@ -79,12 +93,16 @@ function isEntryPoint() {
   return process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
 }
 
-if (isEntryPoint()) {
+export async function startSidecar() {
   if (!process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN) {
     throw new Error('缺少 ANTIGRAVITY_SIDECAR_UI_TOKEN，拒绝启动。');
   }
   const { SidecarApp } = await import('sidecar_sdk');
   const app = new SidecarApp();
   mountPoolRoutes(app, findAppData(process.env.ANTIGRAVITY_EXECUTABLE_DATA_DIR, 'sidecar_data'));
-  await app.run();
+  return app.run();
+}
+
+if (isEntryPoint()) {
+  await startSidecar();
 }

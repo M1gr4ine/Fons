@@ -167,17 +167,18 @@ test('removing a delivered item records its retraction without changing the hook
   assert.deepEqual(snapshot(ctx).items.map((row) => row.text), ['draft']);
 });
 
-test('flush and leftover temporary JSON files do not damage the ledger or snapshot', (t) => {
+test('holdEditing and leftover temporary JSON files do not damage the ledger or snapshot', (t) => {
   const ctx = fixture(t);
-  store.addIdeas({ ...ctx, texts: ['draft'] });
-  const current = item(ctx, 'draft');
-  state(ctx, { delivered: { [current.id]: { at: 1 } } });
+  store.addIdeas({ ...ctx, texts: ['sent', 'draft'] });
+  const sent = item(ctx, 'sent');
+  const draft = item(ctx, 'draft');
+  state(ctx, { delivered: { [sent.id]: { at: 1 } } });
   put(`${paths(ctx).state}.tmp-9`, '{incomplete');
   put(`${paths(ctx).ui}.tmp-9`, '{incomplete');
-  store.requestFlush(ctx);
-  assert.equal(item(ctx, 'draft').status, 'delivered');
-  assert.ok(JSON.parse(fs.readFileSync(paths(ctx).ui, 'utf8')).flushRequestedAt > 0);
-  assert.ok(JSON.parse(fs.readFileSync(paths(ctx).state, 'utf8')).delivered[current.id]);
+  store.holdEditing({ ...ctx, id: draft.id, now: 5000 });
+  assert.equal(item(ctx, 'sent').status, 'delivered');
+  assert.ok(JSON.parse(fs.readFileSync(paths(ctx).ui, 'utf8')).timers[draft.id].holdUntil > 5000);
+  assert.ok(JSON.parse(fs.readFileSync(paths(ctx).state, 'utf8')).delivered[sent.id]);
 });
 
 test('archive keeps the remaining duplicate id stable and deletes a fully completed inbox', (t) => {
@@ -272,37 +273,36 @@ test('migration keeps an active repeated text delivered despite old completion h
 
 
 
-test('debounce tracks pending text changes but ignores delivered completion', (t) => {
+test('per-item timers stay independent across additions and completions while delivered/done rows lock edits', (t) => {
   const ctx = fixture(t);
-  store.addIdeas({ ...ctx, texts: ['sent', 'draft', 'another'] });
+  store.addIdeas({ ...ctx, texts: ['sent', 'draft'] });
   const sent = item(ctx, 'sent');
+  const draft = item(ctx, 'draft');
   state(ctx, { delivered: { [sent.id]: { at: 1 } } });
   const data = store.readPoolData(ctx);
-  const initial = store.computeDebounce({ ...data, mtimeMs: 1000, debounceMs: 60000, now: 11000 });
-  const ledger = { ...data.state, pendingSig: initial.sig, pendingSigAt: initial.pendingSigAt };
-  const unchanged = store.computeDebounce({ ...data, state: ledger, mtimeMs: 5000, debounceMs: 60000, now: 11000 });
-  assert.equal(unchanged.debounceRemainingMs, 50000);
-  store.completeIdea({ ...ctx, token: sent.token });
-  const afterDone = store.computeDebounce({ ...store.readPoolData(ctx), state: ledger, mtimeMs: 5000, debounceMs: 60000, now: 11000 });
-  assert.equal(afterDone.pendingSigAt, 1000);
-  store.completeIdea({ ...ctx, token: item(ctx, 'draft').token });
-  const afterDraftDone = store.computeDebounce({ ...store.readPoolData(ctx), state: ledger, mtimeMs: 9000, debounceMs: 60000, now: 11000 });
-  assert.equal(afterDraftDone.pendingSigAt, 9000);
-  assert.equal(afterDraftDone.debounceRemainingMs, 58000);
-  store.addIdeas({ ...ctx, texts: ['new'] });
-  const afterAdd = store.computeDebounce({ ...store.readPoolData(ctx), state: { ...ledger, pendingSig: afterDraftDone.sig, pendingSigAt: 9000 }, mtimeMs: 10000, debounceMs: 60000, now: 11000 });
-  assert.equal(afterAdd.pendingSigAt, 10000);
-  assert.equal(afterAdd.debounceRemainingMs, 59000);
-  assert.equal(store.computeDebounce({ ...store.readPoolData(ctx), state: ledger, mtimeMs: 10000, debounceMs: 0, now: 11000 }).debounceRemainingMs, 0);
-});
+  const initial = store.computeDebounce({ ...data, mtimeMs: 1000, debounceMs: 45000, now: 11000 });
+  assert.equal(initial.byId.get(draft.id).remainingMs, 35000);
+  const ledger = { ...data.state, pendingAt: initial.pendingAt };
 
-test('requestFlush makes the current pending draft immediately deliverable', (t) => {
-  const ctx = fixture(t);
-  store.addIdeas({ ...ctx, texts: ['draft'] });
-  assert.ok(snapshot(ctx).debounceRemainingMs > 0);
-  store.requestFlush(ctx);
-  assert.equal(snapshot(ctx).flushPending, true);
-  assert.equal(snapshot(ctx).debounceRemainingMs, 0);
+  store.completeIdea({ ...ctx, token: sent.token });
+  const afterDone = store.computeDebounce({ ...store.readPoolData(ctx), state: ledger, mtimeMs: 15000, debounceMs: 45000, now: 16000 });
+  assert.equal(afterDone.byId.get(draft.id).since, 1000);
+  assert.equal(afterDone.byId.get(draft.id).remainingMs, 30000);
+
+  store.addIdeas({ ...ctx, texts: ['second'] });
+  const second = item(ctx, 'second');
+  const afterAdd = store.computeDebounce({ ...store.readPoolData(ctx), state: ledger, mtimeMs: 20000, debounceMs: 45000, now: 21000 });
+  assert.equal(afterAdd.byId.get(draft.id).since, 1000);
+  assert.equal(afterAdd.byId.get(draft.id).remainingMs, 25000);
+  assert.equal(afterAdd.byId.get(second.id).since, 20000);
+  assert.equal(afterAdd.byId.get(second.id).remainingMs, 44000);
+
+  const doneRow = item(ctx, 'sent');
+  assert.deepEqual(store.updateIdeaText({ ...mutation(ctx, doneRow), newText: 'cannot edit done' }), { conflict: true, locked: true });
+  store.addIdeas({ ...ctx, texts: ['alreadySent'] });
+  const sentRow = item(ctx, 'alreadySent');
+  state(ctx, { ...ledger, delivered: { [sentRow.id]: { at: 2 } } });
+  assert.deepEqual(store.updateIdeaText({ ...mutation(ctx, item(ctx, 'alreadySent')), newText: 'cannot edit sent' }), { conflict: true, locked: true });
 });
 
 test('deleting a preceding row preserves a later receipt and duplicate delivery id', (t) => {
@@ -366,10 +366,11 @@ test('the exact token can complete the second duplicate without completing the f
 
 test('zero debounce is immediate even when filesystem mtime is fractionally ahead', () => {
   const result = store.computeDebounce({
-    items: [{ id: 'one', text: 'draft', status: 'buffering' }],
+    items: [{ id: 'aaaaaaaaaaaa', text: 'draft', status: 'buffering' }],
     state: {}, ui: {}, mtimeMs: 1000.75, debounceMs: 0, now: 1000,
   });
-  assert.equal(result.debounceRemainingMs, 0);
+  assert.equal(result.byId.get('aaaaaaaaaaaa').remainingMs, 0);
+  assert.equal(result.ready.length, 1);
 });
 
 
@@ -783,4 +784,47 @@ fs.linkSync = function(source, target, ...args) {
     if (phase === 'after') assert.deepEqual(fs.readFileSync(paths(ctx).state), fs.readFileSync(staging));
     assert.equal(store.getMigrationWarning({ rootDir: ctx.rootDir }).status, 'interrupted');
   }
+});
+
+test('default debounce is 45 seconds and per-item editing hold freezes only the held item and safely expires', (t) => {
+  const saved = process.env.FONS_DEBOUNCE_SEC;
+  t.after(() => {
+    if (saved === undefined) delete process.env.FONS_DEBOUNCE_SEC;
+    else process.env.FONS_DEBOUNCE_SEC = saved;
+  });
+  delete process.env.FONS_DEBOUNCE_SEC;
+  assert.equal(store.resolveDebounceMs(), 45000);
+  process.env.FONS_DEBOUNCE_SEC = 'invalid';
+  assert.equal(store.resolveDebounceMs(), 45000);
+  delete process.env.FONS_DEBOUNCE_SEC;
+
+  const ctx = fixture(t);
+  store.addIdeas({ ...ctx, texts: ['first', 'second'] });
+  const baseAt = 10000;
+  fs.utimesSync(paths(ctx).ideas, new Date(baseAt), new Date(baseAt));
+  store.stampPoolTimers({ ...ctx, now: baseAt });
+  const firstId = item(ctx, 'first').id;
+  const secondId = item(ctx, 'second').id;
+
+  assert.equal(store.holdEditing({ ...ctx, id: secondId, now: 25000 }).editingHold, true);
+  const heldMid = store.readPoolSnapshot({ ...ctx, now: 32000 });
+  const firstMid = heldMid.items.find((row) => row.id === firstId);
+  const secondMid = heldMid.items.find((row) => row.id === secondId);
+  assert.equal(firstMid.editingHold, false);
+  assert.equal(firstMid.remainingMs, 23000);
+  assert.equal(secondMid.editingHold, true);
+  assert.equal(secondMid.remainingMs, 30000);
+
+  assert.equal(store.holdEditing({ ...ctx, id: secondId, now: 35000 }).editingHold, true);
+  assert.equal(store.readPoolSnapshot({ ...ctx, now: 42000 }).items.find((row) => row.id === secondId).remainingMs, 30000);
+
+  store.releaseEditing({ ...ctx, id: secondId, now: 45000 });
+  const afterRelease = store.readPoolSnapshot({ ...ctx, now: 50000 }).items.find((row) => row.id === secondId);
+  assert.equal(afterRelease.editingHold, false);
+  assert.equal(afterRelease.remainingMs, 25000);
+
+  store.holdEditing({ ...ctx, id: secondId, now: 50000 });
+  const afterLeaseExpiry = store.readPoolSnapshot({ ...ctx, now: 70000 }).items.find((row) => row.id === secondId);
+  assert.equal(afterLeaseExpiry.editingHold, false);
+  assert.equal(afterLeaseExpiry.remainingMs, 20000);
 });

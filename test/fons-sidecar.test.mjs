@@ -70,10 +70,11 @@ test('request IDs must be explicit valid UUIDs', async (t) => {
   await register(ctx);
   for (const conversationId of [undefined, '', '../escape', 'CON']) {
     assert.equal((await read(ctx, { conversationId })).status, 400);
-    for (const action of ['add', 'complete', 'update', 'remove', 'reopen', 'flush', 'archive']) {
+    for (const action of ['add', 'complete', 'update', 'remove', 'reopen', 'archive', 'hold', 'release']) {
       assert.equal((await post(ctx, action, { conversationId })).status, 400);
     }
   }
+  assert.equal(ctx.routes.has('POST /api/pool/flush'), false);
   assert.equal(fs.existsSync(path.join(ctx.rootDir, '.agents')), false);
 });
 
@@ -104,7 +105,7 @@ test('etag reports unchanged snapshots and changes after a write', async (t) => 
   assert.deepEqual(next.items.map((item) => item.text), ['new']);
 });
 
-test('route operations add, complete, reopen, edit, remove, flush and archive the current inbox', async (t) => {
+test('route operations add, complete, reopen, edit, hold, release, remove and archive the current inbox', async (t) => {
   const ctx = await mounted(t);
   await register(ctx);
   await post(ctx, 'add', { texts: ['one', 'two'] });
@@ -114,6 +115,7 @@ test('route operations add, complete, reopen, edit, remove, flush and archive th
   snapshot = await read(ctx);
   const done = snapshot.items.find((item) => item.text === 'one');
   assert.equal(done.status, 'done');
+  assert.deepEqual(await post(ctx, 'update', { rowIndex: done.rowIndex, expectedRaw: done.raw, newText: 'locked' }), { conflict: true, locked: true });
   await post(ctx, 'reopen', { rowIndex: done.rowIndex, expectedRaw: done.raw });
   snapshot = await read(ctx);
   const reopened = snapshot.items.find((item) => item.text === 'one');
@@ -121,11 +123,14 @@ test('route operations add, complete, reopen, edit, remove, flush and archive th
   await post(ctx, 'update', { rowIndex: reopened.rowIndex, expectedRaw: reopened.raw, newText: 'edited' });
   snapshot = await read(ctx);
   assert.deepEqual(snapshot.items.map((item) => item.text), ['edited', 'two']);
+  const edited = snapshot.items.find((item) => item.text === 'edited');
+  await post(ctx, 'hold', { id: edited.id });
+  assert.equal((await read(ctx)).items.find((item) => item.id === edited.id).editingHold, true);
+  await post(ctx, 'release', { id: edited.id });
+  assert.equal((await read(ctx)).items.find((item) => item.id === edited.id).editingHold, false);
   const two = snapshot.items.find((item) => item.text === 'two');
   await post(ctx, 'remove', { rowIndex: two.rowIndex, expectedRaw: two.raw });
-  await post(ctx, 'flush');
   snapshot = await read(ctx);
-  assert.equal(snapshot.flushPending, true);
   assert.deepEqual(snapshot.items.map((item) => item.text), ['edited']);
   await post(ctx, 'complete', { token: snapshot.items[0].token });
   await post(ctx, 'archive');
@@ -170,6 +175,8 @@ test('mutation routes reject malformed payloads without changing the inbox', asy
     ['update', { rowIndex: -1, expectedRaw: '', newText: 'bad' }],
     ['remove', { rowIndex: 0, expectedRaw: null }],
     ['reopen', { rowIndex: 0, expectedRaw: null }],
+    ['hold', { id: 'bad-id' }],
+    ['release', { id: '' }],
   ];
   for (const [action, payload] of invalid) {
     const response = await post(ctx, action, payload);
@@ -183,7 +190,7 @@ test('mutation routes reject malformed payloads without changing the inbox', asy
 
 test('unregistered sessions cannot create data through any mutation route', async (t) => {
   const ctx = await mounted(t);
-  for (const action of ['add', 'complete', 'update', 'remove', 'reopen', 'flush', 'archive']) {
+  for (const action of ['add', 'complete', 'update', 'remove', 'reopen', 'archive', 'hold', 'release']) {
     const response = await post(ctx, action, {});
     assert.equal(response.status, 404);
     assert.match(JSON.parse(response.body).error, /尚未.*登记/);
@@ -230,13 +237,20 @@ const syntheticEnv = {
   ANTIGRAVITY_SIDECAR_WEB_PORT: '0',
 };
 
-test('entry point fails closed when the host UI token is missing', { skip: !fs.existsSync(sdkLoader) }, () => {
-  const child = spawnSync(process.execPath, ['--import', pathToFileURL(sdkLoader).href, mainPath], {
-    env: syntheticEnv, encoding: 'utf8', timeout: 2000,
-  });
-  assert.equal(child.signal, null, 'process should exit without waiting for a timeout');
-  assert.notEqual(child.status, 0);
-  assert.match(child.stderr, /ANTIGRAVITY_SIDECAR_UI_TOKEN/);
+test('entry point and ui-plugin junction bootstrap both fail closed when the host UI token is missing', { skip: !fs.existsSync(sdkLoader) }, (t) => {
+  const { rootDir } = fixture(t);
+  const linkedPlugin = path.join(rootDir, 'plugins', 'fons-pool');
+  fs.mkdirSync(path.dirname(linkedPlugin), { recursive: true });
+  fs.symlinkSync(path.resolve('ui-plugin'), linkedPlugin, process.platform === 'win32' ? 'junction' : 'dir');
+  const bootstrapPath = path.join(linkedPlugin, 'sidecars', 'fons-pool', 'bootstrap.mjs');
+  for (const entry of [mainPath, bootstrapPath]) {
+    const child = spawnSync(process.execPath, ['--import', pathToFileURL(sdkLoader).href, entry], {
+      cwd: path.dirname(entry), env: syntheticEnv, encoding: 'utf8', timeout: 2000,
+    });
+    assert.equal(child.signal, null, 'process should exit without waiting for a timeout');
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /ANTIGRAVITY_SIDECAR_UI_TOKEN/);
+  }
 });
 
 test('SDK rejects missing and invalid tokens for every data route', { skip: !fs.existsSync(sdkIndex) }, (t) => {
@@ -254,7 +268,7 @@ test('SDK rejects missing and invalid tokens for every data route', { skip: !fs.
     const server = await app.run();
     try {
       const base = 'http://127.0.0.1:' + server.address().port;
-      for (const route of ['/api/pool', ...['add','complete','update','remove','reopen','flush','archive'].map(x => '/api/pool/' + x)]) {
+      for (const route of ['/api/pool', ...['add','complete','update','remove','reopen','archive','hold','release'].map(x => '/api/pool/' + x)]) {
         for (const token of [null, 'incorrect']) {
           const headers = { 'Content-Type': 'application/json' };
           if (token) headers['X-Sidecar-Token'] = token;

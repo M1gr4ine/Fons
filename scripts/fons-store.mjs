@@ -168,32 +168,99 @@ export function readPoolData({ rootDir, sessionId }) {
   return { paths, content, archive, state, ui, rows, items, etag, mtimeMs };
 }
 
+export const DEFAULT_DEBOUNCE_SEC = 45;
+const HOLD_LEASE_MS = 15000;
+
 export function resolveDebounceMs() {
   const raw = process.env.FONS_DEBOUNCE_SEC;
-  if (raw === undefined || raw.trim() === '') return 60000;
+  if (raw === undefined || raw.trim() === '') return DEFAULT_DEBOUNCE_SEC * 1000;
   const seconds = Number(raw);
-  return (Number.isFinite(seconds) && seconds >= 0 ? seconds : 60) * 1000;
+  return (Number.isFinite(seconds) && seconds >= 0 ? seconds : DEFAULT_DEBOUNCE_SEC) * 1000;
+}
+
+function resolveItemSince(id, state, ui, mtimeMs) {
+  const limit = mtimeMs + 1000;
+  const uiAt = ui.timers?.[id]?.since;
+  if (typeof uiAt === 'number' && uiAt <= limit) return uiAt;
+  const stateAt = state.pendingAt?.[id];
+  if (typeof stateAt === 'number' && stateAt <= limit) return stateAt;
+  return mtimeMs;
+}
+
+function itemHoldStatus(timer, since, now) {
+  if (!timer) return { editingHold: false, pausedMs: 0 };
+  let pausedMs = Math.max(0, timer.pausedMs || 0);
+  const active = typeof timer.holdSince === 'number' && typeof timer.holdUntil === 'number' && timer.holdUntil > timer.holdSince;
+  if (active) {
+    pausedMs += Math.max(0, Math.min(now, timer.holdUntil) - Math.max(timer.holdSince, since));
+  }
+  return { editingHold: active && now < timer.holdUntil, pausedMs };
+}
+
+function evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now }) {
+  const since = resolveItemSince(item.id, state, ui, mtimeMs);
+  const timer = ui.timers?.[item.id];
+  const hold = debounceMs > 0 ? itemHoldStatus(timer, since, now) : { editingHold: false, pausedMs: 0 };
+  const elapsedMs = Math.max(0, now - since - hold.pausedMs);
+  const remainingMs = debounceMs > 0 ? Math.max(0, debounceMs - elapsedMs) : 0;
+  return { since, remainingMs, editingHold: hold.editingHold, pausedMs: hold.pausedMs };
 }
 
 export function computeDebounce({ items, state, ui, mtimeMs, debounceMs = resolveDebounceMs(), now = Date.now() }) {
   const uniqueItems = new Map();
   for (const item of items) {
-    if (item.status === 'buffering') uniqueItems.set(item.text, item);
+    if (item.status === 'buffering' && !uniqueItems.has(item.text)) uniqueItems.set(item.text, item);
   }
-  const pending = [...uniqueItems.values()];
-  const unique = [...uniqueItems.keys()].sort();
-  const sig = crypto.createHash('sha1').update(unique.join('\0')).digest('hex');
-  const pendingSigAt = state.pendingSig === sig && typeof state.pendingSigAt === 'number' ? state.pendingSigAt : mtimeMs;
-  const flushPending = pending.length > 0 && typeof ui.flushRequestedAt === 'number' && ui.flushRequestedAt >= pendingSigAt;
-  const debounceRemainingMs = unique.length && debounceMs > 0 && !flushPending ? Math.max(0, debounceMs - (now - pendingSigAt)) : 0;
-  return { pending, sig, pendingSigAt, flushPending, debounceRemainingMs };
+  const byId = new Map();
+  const ready = [];
+  const pendingAt = {};
+  for (const item of uniqueItems.values()) {
+    const info = evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now });
+    pendingAt[item.id] = info.since;
+    byId.set(item.id, info);
+    if (info.remainingMs <= 0 && !info.editingHold) ready.push(item);
+  }
+  return { pending: [...uniqueItems.values()], ready, byId, pendingAt, debounceMs };
+}
+
+function nextItemTimer(item, freshSet, data, now) {
+  if (freshSet.has(item.text)) return { since: now, pausedMs: 0, holdSince: null, holdUntil: 0 };
+  const current = data.ui.timers?.[item.id];
+  if (current && typeof current.since === 'number') return current;
+  const since = resolveItemSince(item.id, data.state, data.ui, data.mtimeMs || now);
+  return { since, pausedMs: 0, holdSince: null, holdUntil: 0 };
+}
+
+export function stampPoolTimers({ rootDir, sessionId, freshTexts = [], now = Date.now() }) {
+  const data = readPoolData({ rootDir, sessionId });
+  const buffering = data.items.filter((item) => item.status === 'buffering');
+  const previous = JSON.stringify(data.ui.timers ?? null);
+  if (!buffering.length && !data.ui.timers) return;
+  const freshSet = new Set(freshTexts);
+  const nextTimers = {};
+  for (const item of buffering) {
+    nextTimers[item.id] = nextItemTimer(item, freshSet, data, now);
+  }
+  if (Object.keys(nextTimers).length) data.ui.timers = nextTimers;
+  else delete data.ui.timers;
+  if (JSON.stringify(data.ui.timers ?? null) !== previous) {
+    writeJsonAtomic(data.paths.ui, data.ui);
+  }
 }
 
 export function readPoolSnapshot({ rootDir, sessionId, debounceMs = resolveDebounceMs(), now = Date.now() }) {
   const data = readPoolData({ rootDir, sessionId });
   const timing = computeDebounce({ ...data, debounceMs, now });
-  return { items: data.items, debounceRemainingMs: timing.debounceRemainingMs, flushPending: timing.flushPending,
-    canArchive: data.items.some((item) => item.status === 'done'), etag: data.etag };
+  const items = data.items.map((item) => {
+    const info = item.status === 'buffering' ? timing.byId.get(item.id) : null;
+    return { ...item, remainingMs: info ? info.remainingMs : 0, editingHold: Boolean(info?.editingHold) };
+  });
+  const heldIds = [...timing.byId.entries()].filter(([, info]) => info.editingHold).map(([id]) => id).sort().join(',');
+  const etag = heldIds ? `${data.etag}|hold:${heldIds}` : data.etag;
+  return {
+    items, debounceMs: timing.debounceMs,
+    canArchive: items.some((item) => item.status === 'done'), etag,
+  };
 }
 
 export function addIdeas({ rootDir, sessionId, texts }) {
@@ -246,11 +313,13 @@ export function updateIdeaText({ rootDir, sessionId, rowIndex, expectedRaw, newT
   const data = readPoolData({ rootDir, sessionId });
   const item = checkItem(data, rowIndex, expectedRaw);
   if (!item) return { conflict: true };
+  if (item.status !== 'buffering') return { conflict: true, locked: true };
   const text = String(newText).replace(/[\r\n]+/g, ' ').trim();
   if (!text) throw new Error('灵感内容不能为空。');
   const eol = data.rows[rowIndex].raw.slice(data.rows[rowIndex].body.length);
-  const prefix = item.status === 'done' && item.doneSource !== 'readonly_ack' ? COMPLETED_PREFIX : '- [ ] ';
-  return replaceRow(data, rowIndex, `${prefix}${text}${eol}`);
+  const result = replaceRow(data, rowIndex, `- [ ] ${text}${eol}`);
+  if (!result.conflict) return { conflict: false, updatedText: text };
+  return result;
 }
 
 function restoreRetraction(data, item, published, previous) {
@@ -316,18 +385,48 @@ export function reopenIdea({ rootDir, sessionId, rowIndex, expectedRaw }) {
     return { conflict: false };
   }
   const row = data.rows[rowIndex];
-  return replaceRow(data, rowIndex, `- [ ] ${item.text}${row.raw.slice(row.body.length)}`);
+  const result = replaceRow(data, rowIndex, `- [ ] ${item.text}${row.raw.slice(row.body.length)}`);
+  if (!result.conflict) return { conflict: false, reopenedText: item.text };
+  return result;
 }
 
-export function requestFlush({ rootDir, sessionId }) {
-  const paths = sessionPaths({ rootDir, sessionId });
-  const ui = readJson(paths.ui);
-  let mtimeMs = 0;
-  try { mtimeMs = fs.statSync(paths.ideas).mtimeMs; }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
-  ui.flushRequestedAt = Math.max(Date.now(), mtimeMs);
-  writeJsonAtomic(paths.ui, ui);
-  return { flushRequestedAt: ui.flushRequestedAt };
+export function holdEditing({ rootDir, sessionId, id, now = Date.now() }) {
+  const data = readPoolData({ rootDir, sessionId });
+  const target = data.items.find((item) => item.id === id && item.status === 'buffering');
+  if (!target) {
+    if (data.ui.timers?.[id]) {
+      delete data.ui.timers[id];
+      if (!Object.keys(data.ui.timers).length) delete data.ui.timers;
+      writeJsonAtomic(data.paths.ui, data.ui);
+    }
+    return { editingHold: false };
+  }
+  const since = resolveItemSince(id, data.state, data.ui, data.mtimeMs || now);
+  const status = itemHoldStatus(data.ui.timers?.[id], since, now);
+  const holdSince = status.editingHold ? data.ui.timers[id].holdSince : now;
+  const pausedMs = status.editingHold ? Math.max(0, data.ui.timers[id].pausedMs || 0) : status.pausedMs;
+  data.ui.timers ??= {};
+  data.ui.timers[id] = { since, pausedMs, holdSince, holdUntil: now + HOLD_LEASE_MS };
+  writeJsonAtomic(data.paths.ui, data.ui);
+  return { editingHold: true, id, until: data.ui.timers[id].holdUntil };
+}
+
+export function releaseEditing({ rootDir, sessionId, id, now = Date.now() }) {
+  const data = readPoolData({ rootDir, sessionId });
+  const current = data.ui.timers?.[id];
+  if (!current) return { editingHold: false };
+  const target = data.items.find((item) => item.id === id && item.status === 'buffering');
+  if (!target) {
+    delete data.ui.timers[id];
+    if (!Object.keys(data.ui.timers).length) delete data.ui.timers;
+    writeJsonAtomic(data.paths.ui, data.ui);
+    return { editingHold: false };
+  }
+  const since = resolveItemSince(id, data.state, data.ui, data.mtimeMs || now);
+  const status = itemHoldStatus(current, since, now);
+  data.ui.timers[id] = { since, pausedMs: status.pausedMs, holdSince: null, holdUntil: 0 };
+  writeJsonAtomic(data.paths.ui, data.ui);
+  return { editingHold: false, id };
 }
 
 function archiveRows(rows, doneByIndex = new Map()) {
@@ -440,11 +539,18 @@ function migrationLedger(bucket, mapping, field) {
 
 function migrationOutput(entries, bucket) {
   const mapping = migrationIdMapping(entries);
+  const rest = { ...bucket };
+  delete rest.pendingSig;
+  delete rest.pendingSigAt;
   return {
     content: migrationContent(entries),
-    state: { ...bucket, delivered: migrationLedger(bucket, mapping, 'delivered'),
+    state: {
+      ...rest,
+      delivered: migrationLedger(bucket, mapping, 'delivered'),
       acknowledged: migrationLedger(bucket, mapping, 'acknowledged'),
-      lastStopSig: '', stopCount: 0, pendingSig: '', pendingSigAt: 0 },
+      lastStopSig: '',
+      stopCount: 0,
+    },
   };
 }
 function migrationLegacyPaths(fonsDir) {

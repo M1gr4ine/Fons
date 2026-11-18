@@ -4,65 +4,495 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>灵感池</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M12 3.2C12 3.2 8.75 7.1 8.75 9.55a3.25 3.25 0 0 0 6.5 0C15.25 7.1 12 3.2 12 3.2Z' fill='%2338BDF8' fill-opacity='.25' stroke='%230EA5E9' stroke-width='1.8'/%3E%3Cpath d='M5.6 15.3c1.9-1.2 4.2 1.2 6.4 0 2.2-1.2 4.5 1.2 6.4 0' stroke='%2314B8A6' stroke-width='1.7' stroke-linecap='round'/%3E%3Cpath d='M4.25 13.25C4.25 17.55 7.7 20.75 12 20.75s7.75-3.2 7.75-7.5' stroke='%230EA5E9' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E">
   <script src="/preload.js"></script>
   <style>
     * { box-sizing: border-box; }
     html, body { width: 100%; height: 100%; margin: 0; }
-    body { background: var(--background); color: var(--foreground); font: 13px/1.5 var(--font-family, sans-serif); }
+    body {
+      background: var(--background);
+      color: var(--foreground);
+      font: 13px/1.5 var(--font-family, system-ui, -apple-system, sans-serif);
+      -webkit-font-smoothing: antialiased;
+    }
     button, textarea, input { font: inherit; }
     button { color: inherit; background: transparent; border: 0; cursor: pointer; }
-    button:disabled { opacity: .45; cursor: default; }
-    button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 1px solid var(--primary); outline-offset: 2px; }
+    button:disabled { opacity: .38; cursor: default; }
+    button:focus-visible, input:focus-visible {
+      outline: 1.5px solid var(--primary);
+      outline-offset: 2px;
+    }
+    textarea:focus-visible { outline: none; }
     [hidden] { display: none !important; }
-    .pool { height: 100%; min-width: 0; display: flex; flex-direction: column; }
-    .bar { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
-    .bar h1 { font-size: 13px; font-weight: 600; margin: 0 auto 0 0; }
-    .bar button { padding: 3px 4px; }
-    .bar button:not(:disabled):hover, .remove:hover { background: var(--muted); }
-    .countdown, .status { color: var(--muted-foreground); font-size: 11px; white-space: nowrap; }
-    .warning, .notice { padding: 7px 12px; overflow-wrap: anywhere; }
-    .warning { color: var(--error); border-bottom: 1px solid var(--border); }
-    .notice { color: var(--muted-foreground); }
-    .list { flex: 1; overflow-y: auto; min-height: 0; padding: 4px 8px; }
-    .row { display: flex; align-items: flex-start; gap: 7px; padding: 5px 4px; min-width: 0; }
-    .row input { margin: 4px 0 0; accent-color: var(--primary); flex: none; }
-    textarea { display: block; width: 100%; min-height: 21px; padding: 0; border: 0; border-radius: 0; resize: none; overflow: hidden; background: transparent; color: var(--foreground); line-height: 1.5; overflow-wrap: anywhere; }
+
+    .pool {
+      position: relative;
+      height: 100%;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      --accent-soft: color-mix(in srgb, var(--primary) 13%, transparent);
+      --accent-ring: color-mix(in srgb, var(--primary) 36%, var(--border));
+      --surface-hover: color-mix(in srgb, var(--muted) 52%, transparent);
+      --surface-active: color-mix(in srgb, var(--muted) 76%, transparent);
+      --hold-tint: color-mix(in srgb, var(--primary) 58%, #f59e0b);
+    }
+
+    /* Header */
+    .bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 43px;
+      padding: 6px 10px 6px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0 auto 0 0;
+      min-width: 0;
+    }
+    .brand-icon {
+      width: 17px;
+      height: 17px;
+      flex: none;
+      color: var(--muted-foreground);
+      transition: color 220ms ease;
+    }
+    .brand-drop {
+      fill: transparent;
+      transition: fill 220ms ease, stroke 220ms ease;
+    }
+    .pool[data-phase="buffering"] .brand-icon { color: var(--primary); }
+    .pool[data-phase="buffering"] .brand-drop { fill: color-mix(in srgb, var(--primary) 26%, transparent); }
+    .pool[data-phase="holding"] .brand-icon { color: var(--hold-tint); }
+    .pool[data-phase="holding"] .brand-drop { fill: color-mix(in srgb, var(--hold-tint) 28%, transparent); }
+
+    .bar h1 {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      margin: 0;
+      white-space: nowrap;
+    }
+    .pool-count {
+      font-size: 11px;
+      line-height: 16px;
+      min-width: 17px;
+      padding: 0 5px;
+      border-radius: 999px;
+      text-align: center;
+      color: var(--muted-foreground);
+      background: var(--surface-hover);
+      font-variant-numeric: tabular-nums;
+    }
+    .bar button {
+      font-size: 12px;
+      line-height: 20px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      white-space: nowrap;
+      transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 90ms ease;
+    }
+    .bar button:not(:disabled):hover {
+      background: var(--surface-hover);
+      border-color: var(--border);
+    }
+    .bar button:not(:disabled):active { transform: scale(0.97); }
+    .flow-toggle {
+      color: var(--muted-foreground);
+      font-size: 11px !important;
+      padding: 2px 7px !important;
+    }
+    .flow-toggle:hover { color: var(--foreground); }
+
+    /* Banners */
+    .warning, .notice {
+      font-size: 12px;
+      padding: 6px 12px;
+      overflow-wrap: anywhere;
+    }
+    .warning {
+      color: var(--error);
+      background: color-mix(in srgb, var(--error) 8%, transparent);
+      border-bottom: 1px solid color-mix(in srgb, var(--error) 22%, var(--border));
+    }
+    .notice {
+      color: var(--muted-foreground);
+      background: var(--surface-hover);
+      border-bottom: 1px solid var(--border);
+      animation: fadeSlide 160ms ease-out;
+    }
+
+    /* List & Empty Stage */
+    .list {
+      flex: 1;
+      overflow-y: auto;
+      min-height: 0;
+      padding: 6px 8px;
+    }
+    .empty-art {
+      display: none;
+      width: 68px;
+      height: 68px;
+      margin: 0 auto 8px;
+      color: var(--muted-foreground);
+      opacity: 0.5;
+    }
+    .list:has(.empty:not([hidden])) {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 18px;
+      text-align: center;
+    }
+    .list:has(.empty:not([hidden])) .empty-art { display: block; }
+    .list:has(.empty:not([hidden])) .rows { display: none; }
+    .empty {
+      max-width: 220px;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--muted-foreground);
+    }
+    .ripple-ring { transform-origin: 32px 38px; }
+    .pool[data-empty="idle"] .ripple-outer { animation: rippleBreath 4.8s ease-in-out infinite; }
+    .pool[data-empty="idle"] .ripple-mid { animation: rippleBreath 4.8s ease-in-out 0.9s infinite; }
+
+    /* Rows & Per-Item Rising Water Level */
+    .rows { display: flex; flex-direction: column; gap: 3px; }
+    .row {
+      position: relative;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px 6px 6px 8px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      min-width: 0;
+      overflow: hidden;
+      transition: background-color 140ms ease, border-color 140ms ease;
+    }
+    .row[data-status="buffering"] {
+      border-color: color-mix(in srgb, var(--border) 62%, transparent);
+      background: color-mix(in srgb, var(--muted) 22%, transparent);
+    }
+    .row:hover { background: var(--surface-hover); }
+    .row[data-status="buffering"]:focus-within {
+      background: var(--surface-active);
+      border-color: var(--accent-ring);
+    }
+    .row[data-holding="true"] {
+      border-color: color-mix(in srgb, var(--hold-tint) 42%, var(--border)) !important;
+    }
+    .row[data-fresh="true"] {
+      animation: dropIn 180ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    .row.ghost {
+      position: absolute;
+      pointer-events: none;
+      z-index: 5;
+      margin: 0;
+    }
+
+    /* Per-Row Rising Water Layer */
+    .row-water {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0;
+      transform: scaleY(0);
+      transform-origin: center bottom;
+      transition: transform 2s linear, opacity 220ms ease, background 220ms ease;
+    }
+    .pool[data-flow="up"] .row[data-status="buffering"] .row-water {
+      opacity: 1;
+      background: linear-gradient(0deg, color-mix(in srgb, var(--primary) 17%, transparent), color-mix(in srgb, var(--primary) 9%, transparent));
+      border-top: 1px solid color-mix(in srgb, var(--primary) 36%, transparent);
+    }
+    .pool[data-flow="right"] .row[data-status="buffering"] .row-water {
+      opacity: 1;
+      background: linear-gradient(90deg, color-mix(in srgb, var(--primary) 9%, transparent), color-mix(in srgb, var(--primary) 18%, transparent));
+      border-right: 1px solid color-mix(in srgb, var(--primary) 38%, transparent);
+    }
+    .row[data-holding="true"] .row-water {
+      transition: transform 180ms ease-out, opacity 200ms ease !important;
+      background: linear-gradient(0deg, color-mix(in srgb, var(--hold-tint) 19%, transparent), color-mix(in srgb, var(--hold-tint) 10%, transparent)) !important;
+      border-color: color-mix(in srgb, var(--hold-tint) 46%, transparent) !important;
+      animation: holdPulse 2s ease-in-out infinite;
+    }
+    .pool[data-switching="true"] .row-water {
+      transition: none !important;
+    }
+
+    .row > input,
+    .row > textarea,
+    .row > .row-timer,
+    .row > .remove {
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Tri-state Droplet & Optically Centered Checkmark */
+    .row input[type="checkbox"] {
+      appearance: none;
+      -webkit-appearance: none;
+      width: 15px;
+      height: 15px;
+      margin: 3px 0 0;
+      flex: none;
+      border-radius: 50%;
+      border: 1.5px dashed color-mix(in srgb, var(--muted-foreground) 68%, transparent);
+      background: transparent;
+      cursor: pointer;
+      transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+    }
+    .row input[type="checkbox"]:hover {
+      border-style: solid;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px var(--accent-soft);
+    }
+    .row input[type="checkbox"]::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      margin: auto;
+      transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), opacity 140ms ease;
+    }
+    .row[data-status="delivered"] input[type="checkbox"] {
+      border-style: solid;
+      border-color: color-mix(in srgb, var(--primary) 78%, var(--border));
+    }
+    .row[data-status="delivered"] input[type="checkbox"]::after {
+      width: 5.5px;
+      height: 5.5px;
+      border-radius: 50%;
+      background: var(--primary);
+    }
+    .row[data-status="done"] input[type="checkbox"] {
+      border-style: solid;
+      border-color: color-mix(in srgb, var(--primary) 72%, transparent);
+      background: color-mix(in srgb, var(--primary) 84%, transparent);
+    }
+    .row[data-status="done"] input[type="checkbox"]::after {
+      width: 100%;
+      height: 100%;
+      background-color: var(--background);
+      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='black' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round' d='M4.1 8.15 6.85 10.9 11.9 5.25'/%3E%3C/svg%3E") center / 13px 13px no-repeat;
+      mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='black' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round' d='M4.1 8.15 6.85 10.9 11.9 5.25'/%3E%3C/svg%3E") center / 13px 13px no-repeat;
+    }
+
+    textarea {
+      display: block;
+      width: 100%;
+      field-sizing: content;
+      min-height: 21px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      resize: none;
+      overflow: hidden;
+      background: transparent;
+      color: var(--foreground);
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
     textarea::placeholder { color: var(--muted-foreground); }
-    .row textarea { flex: 1; min-width: 0; }
-    .row[data-status="done"] textarea { color: var(--muted-foreground); text-decoration: line-through; }
-    .status { padding-top: 2px; }
-    .remove { padding: 0 4px; color: var(--muted-foreground); font-size: 16px; line-height: 21px; }
-    .quick { display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px; border-top: 1px solid var(--border); }
-    .quick span { color: var(--muted-foreground); line-height: 21px; }
+    textarea[readonly] { cursor: default; }
+    .row textarea { flex: 1; min-width: 0; transition: color 150ms ease, opacity 150ms ease; }
+    .row[data-status="done"] textarea {
+      color: var(--muted-foreground);
+      text-decoration: line-through;
+      opacity: 0.72;
+    }
+
+    .row-timer {
+      flex: none;
+      width: 34px;
+      padding-top: 2px;
+      text-align: right;
+      font-size: 11px;
+      line-height: 18px;
+      color: var(--muted-foreground);
+      font-variant-numeric: tabular-nums;
+      user-select: none;
+      pointer-events: none;
+    }
+    .row:not([data-status="buffering"]) .row-timer { display: none; }
+    .row[data-holding="true"] .row-timer {
+      color: var(--hold-tint);
+      font-weight: 500;
+    }
+
+    .status {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .remove {
+      width: 20px;
+      height: 20px;
+      flex: none;
+      padding: 0;
+      border-radius: 5px;
+      color: var(--muted-foreground);
+      font-size: 15px;
+      line-height: 19px;
+      text-align: center;
+      opacity: 0;
+      transition: opacity 130ms ease, background-color 130ms ease, color 130ms ease;
+    }
+    .row:hover .remove,
+    .row:focus-within .remove,
+    .remove:focus-visible { opacity: 0.78; }
+    .remove:hover {
+      opacity: 1 !important;
+      color: var(--error);
+      background: color-mix(in srgb, var(--error) 12%, transparent);
+    }
+
+    /* Bottom Quick-Add Capsule */
+    .quick-shell {
+      padding: 6px 8px 9px;
+      border-top: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+    }
+    .quick {
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      padding: 7px 9px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      background: var(--surface-hover);
+      transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+    }
+    .quick:focus-within {
+      background: var(--background);
+      border-color: var(--accent-ring);
+      box-shadow: 0 0 0 2px var(--accent-soft);
+    }
+    .quick-plus {
+      color: var(--muted-foreground);
+      font-size: 14px;
+      line-height: 20px;
+      user-select: none;
+      transition: color 150ms ease, transform 150ms ease;
+    }
+    .quick:focus-within .quick-plus {
+      color: var(--primary);
+      transform: scale(1.08);
+    }
     .quick textarea { flex: 1; min-width: 0; }
+    .quick-enter {
+      flex: none;
+      font-size: 10px;
+      line-height: 16px;
+      padding: 1px 5px;
+      margin-top: 2px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      color: var(--muted-foreground);
+      opacity: 0;
+      user-select: none;
+      pointer-events: none;
+      transition: opacity 140ms ease;
+    }
+    .quick:focus-within .quick-enter { opacity: 0.65; }
+
+    @keyframes dropIn {
+      from { opacity: 0; transform: translateY(5px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes fadeSlide {
+      from { opacity: 0; transform: translateY(-3px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes holdPulse {
+      0%, 100% { opacity: 0.96; }
+      50% { opacity: 0.48; }
+    }
+    @keyframes rippleBreath {
+      0%, 100% { transform: scale(0.96); opacity: 0.36; }
+      50% { transform: scale(1.04); opacity: 0.75; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation: none !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
   </style>
 </head>
 <body>
-  <main class="pool" data-testid="fons-pool">
+  <main class="pool" data-testid="fons-pool" data-phase="idle" data-flow="up">
     <header class="bar">
-      <h1>灵感池</h1>
-      <span class="countdown" data-testid="fons-countdown" aria-live="polite"></span>
-      <button type="button" data-testid="fons-flush" title="将在下次模型调用时投递">投递</button>
-      <button type="button" data-testid="fons-archive">归档</button>
+      <div class="brand">
+        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path class="brand-drop" d="M12 3.2C12 3.2 8.75 7.1 8.75 9.55a3.25 3.25 0 0 0 6.5 0C15.25 7.1 12 3.2 12 3.2Z" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/>
+          <path d="M5.6 15.3c1.9-1.2 4.2 1.2 6.4 0 2.2-1.2 4.5 1.2 6.4 0" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-opacity="0.72"/>
+          <path d="M4.25 13.25C4.25 17.55 7.7 20.75 12 20.75s7.75-3.2 7.75-7.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+        </svg>
+        <h1>灵感池</h1>
+        <span class="pool-count" hidden></span>
+      </div>
+      <button type="button" class="flow-toggle" data-testid="fons-flow-mode">↑ 水位</button>
+      <button type="button" data-testid="fons-archive" title="收拢并归档已完成灵感">归档</button>
     </header>
     <div class="warning" role="status" hidden></div>
     <div class="notice" role="status" aria-live="polite" hidden></div>
     <div class="list" role="list">
+      <div class="empty-art" aria-hidden="true">
+        <svg viewBox="0 0 64 64" fill="none">
+          <path d="M32 13C32 13 25.5 20.8 25.5 25.7a6.5 6.5 0 0 0 13 0C38.5 20.8 32 13 32 13Z" stroke="currentColor" stroke-width="1.35" stroke-opacity="0.72"/>
+          <ellipse class="ripple-ring ripple-outer" cx="32" cy="43" rx="22" ry="7" stroke="currentColor" stroke-width="1" stroke-dasharray="3 3" stroke-opacity="0.45"/>
+          <ellipse class="ripple-ring ripple-mid" cx="32" cy="43" rx="12.5" ry="4" stroke="currentColor" stroke-width="1.15" stroke-opacity="0.68"/>
+          <circle cx="32" cy="43" r="1.8" fill="currentColor" fill-opacity="0.75"/>
+        </svg>
+      </div>
       <div class="empty" data-testid="fons-empty" hidden></div>
       <div class="rows"></div>
     </div>
-    <div class="quick"><span aria-hidden="true">＋</span><textarea rows="1" data-testid="fons-quick-add" aria-label="记一条灵感" placeholder="记一条，回车继续…" disabled></textarea></div>
+    <div class="quick-shell">
+      <div class="quick">
+        <span class="quick-plus" aria-hidden="true">＋</span>
+        <textarea rows="1" data-testid="fons-quick-add" aria-label="记一条灵感" placeholder="记一条，回车入池…" disabled></textarea>
+        <span class="quick-enter" aria-hidden="true">↵</span>
+      </div>
+    </div>
   </main>
   <script>
     (() => {
       'use strict';
+      const DEFAULT_DEBOUNCE_MS = 45000;
+      const HOLD_RENEW_MS = 5000;
+      const TYPING_QUIET_MS = 1200;
+      const FLOW_STORAGE_KEY = 'fons.waterFlow';
+      const nativeAutoSize = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('field-sizing', 'content');
       const $ = (selector) => document.querySelector(selector);
       const elements = {
-        rows: $('.rows'), empty: $('.empty'), quick: $('[data-testid="fons-quick-add"]'),
-        countdown: $('[data-testid="fons-countdown"]'), flush: $('[data-testid="fons-flush"]'),
-        archive: $('[data-testid="fons-archive"]'), warning: $('.warning'), notice: $('.notice'),
+        pool: $('.pool'), rows: $('.rows'), empty: $('.empty'), quick: $('[data-testid="fons-quick-add"]'),
+        flowMode: $('[data-testid="fons-flow-mode"]'), archive: $('[data-testid="fons-archive"]'),
+        warning: $('.warning'), notice: $('.notice'), count: $('.pool-count'),
       };
-      const state = { id: null, session: 0, epoch: 0, etag: '', registered: false, busy: false, tail: Promise.resolve(), polling: null, refreshNeeded: false, deadline: 0, flushPending: false, workspace: null, workspaceKey: null, boundWorkspaces: new Map() };
+      const state = {
+        id: null, session: 0, epoch: 0, etag: '', registered: false, busy: false,
+        tail: Promise.resolve(), polling: null, refreshNeeded: false,
+        debounceMs: DEFAULT_DEBOUNCE_MS, heldId: null, holdSentAt: 0,
+        composing: false, lastTypedAt: 0, flowMode: readSavedFlowMode(),
+        loadedOnce: false, knownTokens: new Set(),
+        workspace: null, workspaceKey: null, boundWorkspaces: new Map(),
+      };
       let noticeTimer;
       const conversationId = () => window.sidecar?.conversationId || '';
       const current = (id, epoch) => {
@@ -70,27 +500,63 @@
         return state.id === id && state.epoch === epoch;
       };
 
+      function readSavedFlowMode() {
+        try {
+          return window.localStorage?.getItem(FLOW_STORAGE_KEY) === 'right' ? 'right' : 'up';
+        } catch {
+          return 'up';
+        }
+      }
+
+      function applyFlowMode(mode) {
+        state.flowMode = mode === 'right' ? 'right' : 'up';
+        if (elements.pool) {
+          elements.pool.dataset.switching = 'true';
+          elements.pool.dataset.flow = state.flowMode;
+        }
+        if (elements.flowMode) {
+          const upward = state.flowMode === 'up';
+          elements.flowMode.textContent = upward ? '↑ 水位' : '→ 水位';
+          const tip = upward ? '蓄水方向：自下而上（点击切换为自左向右）' : '蓄水方向：自左向右（点击切换为自下而上）';
+          elements.flowMode.setAttribute('title', tip);
+          elements.flowMode.setAttribute('aria-label', tip);
+        }
+        try { window.localStorage?.setItem(FLOW_STORAGE_KEY, state.flowMode); } catch {}
+        updateWaterLevels();
+        if (elements.pool) {
+          void elements.pool.offsetWidth;
+          delete elements.pool.dataset.switching;
+        }
+      }
+
       function showNotice(message) {
         elements.notice.textContent = message;
         elements.notice.hidden = !message;
         clearTimeout(noticeTimer);
-        if (message) noticeTimer = setTimeout(() => { elements.notice.hidden = true; }, 3500);
+        if (message) noticeTimer = setTimeout(() => { elements.notice.hidden = true; }, 3200);
       }
 
       function resize(textarea) {
+        if (nativeAutoSize) return;
         textarea.style.height = 'auto';
         textarea.style.height = `${textarea.scrollHeight}px`;
       }
 
       function updateAvailability() {
         elements.quick.disabled = !state.registered;
-        elements.flush.disabled = !state.registered;
         if (!state.registered) elements.archive.disabled = true;
       }
 
-      function showEmpty(message) {
+      function showEmpty(message, kind = 'context') {
         elements.empty.textContent = message;
         elements.empty.hidden = false;
+        if (elements.pool) elements.pool.dataset.empty = kind;
+      }
+
+      function updateCount(openCount) {
+        if (!elements.count) return;
+        elements.count.hidden = !openCount;
+        elements.count.textContent = openCount ? String(openCount) : '';
       }
 
       function resetPanel() {
@@ -101,16 +567,22 @@
         state.polling = null;
         state.refreshNeeded = false;
         state.busy = false;
-        state.deadline = 0;
-        state.flushPending = false;
+        state.debounceMs = DEFAULT_DEBOUNCE_MS;
+        state.heldId = null;
+        state.holdSentAt = 0;
+        state.composing = false;
+        state.lastTypedAt = 0;
+        state.loadedOnce = false;
+        state.knownTokens = new Set();
         state.registered = false;
         elements.rows.replaceChildren();
         elements.quick.value = '';
         resize(elements.quick);
         elements.warning.hidden = true;
+        updateCount(0);
         showNotice('');
         updateAvailability();
-        updateCountdown();
+        updateWaterLevels();
       }
 
       function bindWorkspace() {
@@ -160,7 +632,7 @@
           try {
             const data = await response.json();
             if (typeof data?.error === 'string' && data.error.trim()) message = data.error;
-          } catch (error) {
+          } catch {
             message = `请求失败（${response.status}）`;
           }
           const error = new Error(message);
@@ -171,26 +643,71 @@
       }
 
       function showFailure(error) {
-        const authorizationFailure = error.status === 401 || error.status === 403;
-        if (authorizationFailure) resetPanel();
+        if (error.status === 401 || error.status === 403) resetPanel();
         else {
           state.registered = false;
           state.etag = '';
-          state.deadline = 0;
-          state.flushPending = false;
+          state.heldId = null;
+          state.holdSentAt = 0;
           elements.rows.replaceChildren();
           elements.warning.hidden = true;
+          updateCount(0);
           showNotice('');
           updateAvailability();
-          updateCountdown();
+          updateWaterLevels();
         }
-        showEmpty(error.message || '读取失败，请重试');
+        showEmpty(error.message || '读取失败，请重试', 'error');
       }
 
-      function updateCountdown() {
-        const seconds = Math.max(0, Math.ceil((state.deadline - Date.now()) / 1000));
-        const remaining = seconds ? `${seconds}s` : '';
-        elements.countdown.textContent = state.flushPending ? '等待下次调用' : remaining;
+      function rowRemainingMs(node) {
+        if (node.frozenMs !== null && node.frozenMs !== undefined) return node.frozenMs;
+        return Math.max(0, (node.deadline || 0) - Date.now());
+      }
+
+      function setWaterScale(water, ratio) {
+        if (!water) return;
+        const rightward = state.flowMode === 'right';
+        water.style.transformOrigin = rightward ? 'left center' : 'center bottom';
+        water.style.transform = rightward ? `scaleX(${ratio.toFixed(4)})` : `scaleY(${ratio.toFixed(4)})`;
+      }
+
+      function rowTimerLabel(rowPhase, seconds) {
+        if (rowPhase === 'holding') return '暂缓';
+        return seconds > 0 ? `${seconds}s` : '待汇入';
+      }
+
+      function isNodeHeld(node) {
+        return Boolean(node.focused || node.dirty || node.saving || node.item?.editingHold);
+      }
+
+      function applyRowWater(node, totalMs) {
+        const water = node.querySelector('.row-water');
+        const timer = node.querySelector('.row-timer');
+        if (node.item?.status !== 'buffering') {
+          delete node.dataset.holding;
+          setWaterScale(water, 0);
+          if (timer) timer.textContent = '';
+          return 'none';
+        }
+        const rowPhase = isNodeHeld(node) ? 'holding' : 'buffering';
+        if (rowPhase === 'holding') node.dataset.holding = 'true';
+        else delete node.dataset.holding;
+        const remaining = rowRemainingMs(node);
+        const seconds = Math.ceil(remaining / 1000);
+        setWaterScale(water, Math.max(0.06, Math.min(1, 1 - remaining / totalMs)));
+        if (timer) timer.textContent = rowTimerLabel(rowPhase, seconds);
+        return rowPhase;
+      }
+
+      function updateWaterLevels() {
+        const total = Math.max(1000, state.debounceMs || DEFAULT_DEBOUNCE_MS);
+        let phase = 'idle';
+        for (const node of elements.rows.children) {
+          const rowState = applyRowWater(node, total);
+          if (rowState === 'holding') phase = 'holding';
+          else if (rowState === 'buffering' && phase === 'idle') phase = 'buffering';
+        }
+        if (elements.pool) elements.pool.dataset.phase = phase;
       }
 
       function updateWarning(warning) {
@@ -202,14 +719,56 @@
         return { buffering: '待投递', delivered: '已投递', done: '已完成' }[status] || '';
       }
 
+      function checkTooltip(status) {
+        return {
+          buffering: '待投递（蓄水中）· 点击直接标为完成',
+          delivered: '已投递（模型已收到）· 点击标为完成',
+          done: '已完成 · 点击重新打开',
+        }[status] || '切换完成状态';
+      }
+
+      function inputTooltip(status) {
+        if (status === 'delivered') return '已投递灵感不支持直接编辑，如需撤回请点击右侧删除';
+        if (status === 'done') return '已完成灵感不支持编辑';
+        return '';
+      }
+
+      function syncRowTiming(node, item) {
+        if (item.status !== 'buffering') {
+          node.deadline = 0;
+          node.frozenMs = null;
+          return;
+        }
+        const remaining = Math.max(0, item.remainingMs ?? state.debounceMs);
+        node.deadline = Date.now() + remaining;
+        if (node.focused || node.dirty || node.saving || item.editingHold) {
+          if (node.frozenMs === null || node.frozenMs === undefined) node.frozenMs = remaining;
+        } else {
+          node.frozenMs = null;
+        }
+      }
+
       function updateRow(node, item) {
         node.item = item;
         node.dataset.token = item.token;
         node.dataset.status = item.status;
-        node.querySelector('input').checked = item.status === 'done';
+        const editable = item.status === 'buffering';
+        const check = node.querySelector('input');
+        check.checked = item.status === 'done';
+        check.setAttribute('title', checkTooltip(item.status));
         node.querySelector('.status').textContent = rowLabel(item.status);
         const input = node.querySelector('textarea');
-        if (document.activeElement !== input && !node.dirty && !node.saving) { input.value = item.text; resize(input); }
+        input.readOnly = !editable;
+        input.setAttribute('title', inputTooltip(item.status));
+        if (!editable) {
+          node.focused = false;
+          node.dirty = false;
+        }
+        if (!editable || (document.activeElement !== input && !node.focused && !node.dirty && !node.saving)) {
+          input.value = item.text;
+          resize(input);
+        }
+        syncRowTiming(node, item);
       }
 
       function itemArguments(node) {
@@ -250,7 +809,8 @@
             body: JSON.stringify({ conversationId: id, ...payload }),
           });
           if (!current(id, epoch)) return null;
-          if (result.conflict) showNotice('内容已被修改');
+          if (result.locked) showNotice('已投递或已完成的灵感不支持编辑');
+          else if (result.conflict) showNotice('内容已被修改');
           onResult(result);
           state.etag = '';
         } catch (error) {
@@ -263,22 +823,87 @@
         syncSession();
         return id === state.id && session === state.session ? result : null;
       }
+
+      function activeHeldNode() {
+        if (!state.registered || document.hidden || workspaceMismatch()) return null;
+        for (const node of elements.rows.children) {
+          if (node.item?.status === 'buffering' && (node.focused || node.dirty || node.saving)) return node;
+        }
+        return null;
+      }
+
+      function isValidHoldId(id) {
+        return typeof id === 'string' && /^[a-f0-9]{12}$/.test(id);
+      }
+
+      function shouldRenewHold(nextId) {
+        if (!isValidHoldId(nextId)) return false;
+        return state.heldId !== nextId || Date.now() - state.holdSentAt >= HOLD_RENEW_MS;
+      }
+
+      function freezeNodeDeadline(target) {
+        if (target.frozenMs === null || target.frozenMs === undefined) {
+          target.frozenMs = Math.max(0, (target.deadline || 0) - Date.now());
+        }
+      }
+
+      function syncHold() {
+        const target = activeHeldNode();
+        const nextId = target?.item?.id || null;
+        if (state.heldId && state.heldId !== nextId) {
+          const releaseId = state.heldId;
+          state.heldId = null;
+          state.holdSentAt = 0;
+          if (isValidHoldId(releaseId)) void mutate('release', { id: releaseId });
+        }
+        if (target && nextId) {
+          freezeNodeDeadline(target);
+          updateWaterLevels();
+          if (shouldRenewHold(nextId)) {
+            state.heldId = nextId;
+            state.holdSentAt = Date.now();
+            void mutate('hold', { id: nextId });
+          }
+          return;
+        }
+        updateWaterLevels();
+      }
+
+      function releaseNodeFreeze(node) {
+        if (node.frozenMs !== null && node.frozenMs !== undefined) {
+          node.deadline = Date.now() + node.frozenMs;
+          node.frozenMs = null;
+        }
+      }
+
+      function applySavedRow(node, value, previousItemId, result) {
+        if (!result.conflict && state.heldId === previousItemId) {
+          state.heldId = null;
+          state.holdSentAt = 0;
+        }
+        node.refreshValue = result.conflict ? null : value;
+        node.conflicted = !!result.conflict;
+        const latest = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
+        node.dirty = !result.conflict && latest !== value;
+      }
+
+      function shouldResaveRow(node, result) {
+        if (!result || result.conflict || !node.dirty) return false;
+        return document.activeElement !== node.querySelector('textarea') && validNode(node);
+      }
+
       function saveRow(node) {
-        if (node.saving) return node.saving;
-        if (!validNode(node)) return Promise.resolve(null);
+        if (node.saving) return Promise.resolve(node.saving);
+        if (!validNode(node) || node.item.status !== 'buffering') return Promise.resolve({ conflict: false });
         const value = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
         if (value === node.item.text) { node.dirty = false; return Promise.resolve({ conflict: false }); }
         if (!value) { showNotice('灵感内容不能为空'); return Promise.resolve(null); }
         const id = node.conversation;
-        node.saving = mutate('update', () => validNode(node) ? { ...itemArguments(node), newText: value } : null, id, (result) => {
-          node.refreshValue = result.conflict ? null : value;
-          node.conflicted = !!result.conflict;
-          node.dirty = !result.conflict && node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim() !== value;
-        }).then((result) => {
+        const previousItemId = node.item.id;
+        const fields = () => (validNode(node) ? { ...itemArguments(node), newText: value } : null);
+        node.saving = mutate('update', fields, id, (result) => applySavedRow(node, value, previousItemId, result)).then((result) => {
           node.saving = null;
-          if (result && !result.conflict && node.dirty && document.activeElement !== node.querySelector('textarea') && validNode(node)) {
-            queueMicrotask(() => { void saveRow(node); });
-          }
+          if (shouldResaveRow(node, result)) queueMicrotask(() => { void saveRow(node); });
           return result;
         });
         return node.saving;
@@ -299,6 +924,7 @@
         };
         const result = await mutate(action, fields, node.conversation);
         if (!result || result.conflict) restoreCheck(node);
+        syncHold();
       }
 
       async function deleteRow(node) {
@@ -307,29 +933,75 @@
         if (!saved || saved.conflict || !validNode(node)) return;
         if (node.item.status === 'delivered' && !window.confirm('模型已收到该条，将发送撤回通知')) return;
         if (!validNode(node)) return;
+        if (state.heldId === node.item.id) { state.heldId = null; state.holdSentAt = 0; }
         await mutate('remove', () => validNode(node) ? itemArguments(node) : null, node.conversation);
+        syncHold();
+      }
+
+      function focusNextEditable(afterIndex) {
+        for (let i = afterIndex + 1; i < elements.rows.children.length; i++) {
+          const row = elements.rows.children[i];
+          if (row.item?.status === 'buffering') {
+            row.querySelector('textarea')?.focus?.();
+            return;
+          }
+        }
+        elements.quick.focus?.();
       }
 
       function onRowKey(event, node) {
         if (event.isComposing || event.keyCode === 229 || event.key !== 'Enter') return;
         event.preventDefault();
+        if (node.item.status !== 'buffering') return;
         const index = [...elements.rows.children].indexOf(node);
         const id = node.conversation;
         void saveRow(node).then((result) => {
           if (!result || result.conflict || id !== conversationId() || !validNode(node)) return;
-          const next = elements.rows.children[index + 1]?.querySelector('textarea') || elements.quick;
-          next.focus();
+          focusNextEditable(index);
+          syncHold();
         });
       }
 
-      function pasteSingleLine(event) {
+      function pasteSingleLine(event, node) {
+        if (node.item.status !== 'buffering') return;
         const text = event.clipboardData.getData('text');
         if (!/[\r\n]/.test(text)) return;
         event.preventDefault();
         const input = event.currentTarget;
         input.setRangeText(text.replace(/[\r\n]+/g, ' '), input.selectionStart, input.selectionEnd, 'end');
-        input.closest('.row').dirty = true;
+        node.dirty = true;
+        state.lastTypedAt = Date.now();
         resize(input);
+      }
+
+      function animateExit(node, mode) {
+        if (typeof node.animate !== 'function' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+        const host = elements.pool;
+        if (!host || typeof node.getBoundingClientRect !== 'function') return;
+        const box = node.getBoundingClientRect();
+        const base = host.getBoundingClientRect();
+        if (!box.height) return;
+        const ghost = node.cloneNode(true);
+        ghost.className = 'row ghost';
+        ghost.style.top = `${box.top - base.top}px`;
+        ghost.style.left = `${box.left - base.left}px`;
+        ghost.style.width = `${box.width}px`;
+        host.append(ghost);
+        const shift = mode === 'up' ? -10 : 4;
+        ghost.animate([
+          { opacity: 1, transform: 'translateY(0) scale(1)' },
+          { opacity: 0, transform: `translateY(${shift}px) scale(0.98)` },
+        ], { duration: 170, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }).onfinish = () => ghost.remove?.();
+      }
+
+      function detachRow(node) {
+        const mode = node.item?.status === 'done' ? 'up' : 'fade';
+        animateExit(node, mode);
+        if (typeof node.remove === 'function') node.remove();
+        else {
+          const index = elements.rows.children.indexOf(node);
+          if (index >= 0) elements.rows.children.splice(index, 1);
+        }
       }
 
       function createRow(item) {
@@ -339,6 +1011,10 @@
         node.setAttribute('role', 'listitem');
         node.conversation = state.id;
         node.session = state.session;
+        if (state.loadedOnce && !state.knownTokens.has(item.token)) node.dataset.fresh = 'true';
+        const water = document.createElement('span');
+        water.className = 'row-water';
+        water.setAttribute('aria-hidden', 'true');
         const check = document.createElement('input');
         check.type = 'checkbox';
         check.dataset.testid = 'fons-check';
@@ -347,6 +1023,9 @@
         input.rows = 1;
         input.dataset.testid = 'fons-input';
         input.setAttribute('aria-label', '灵感内容');
+        const timer = document.createElement('span');
+        timer.className = 'row-timer';
+        timer.setAttribute('aria-hidden', 'true');
         const status = document.createElement('span');
         status.className = 'status';
         const remove = document.createElement('button');
@@ -354,25 +1033,44 @@
         remove.className = 'remove';
         remove.textContent = '×';
         remove.setAttribute('aria-label', '删除灵感');
-        node.append(check, input, status, remove);
+        remove.setAttribute('title', '删除灵感');
+        node.append(water, check, input, timer, status, remove);
         check.addEventListener('change', () => { void changeCheck(node); });
-        input.addEventListener('input', () => { node.dirty = true; resize(input); });
+        input.addEventListener('compositionstart', () => { state.composing = true; });
+        input.addEventListener('compositionend', () => { state.composing = false; state.lastTypedAt = Date.now(); });
+        input.addEventListener('focus', () => {
+          if (node.item.status !== 'buffering') return;
+          node.focused = true;
+          syncHold();
+        });
+        input.addEventListener('input', () => {
+          if (node.item.status !== 'buffering') return;
+          node.dirty = true;
+          state.lastTypedAt = Date.now();
+          resize(input);
+        });
         input.addEventListener('blur', () => {
+          node.focused = false;
+          releaseNodeFreeze(node);
+          if (node.item.status !== 'buffering') {
+            syncHold();
+            return;
+          }
           state.etag = '';
           state.refreshNeeded = true;
-          void saveRow(node).then(() => poll());
+          void saveRow(node).then(() => { syncHold(); return poll(); });
         });
         input.addEventListener('keydown', (event) => onRowKey(event, node));
-        input.addEventListener('paste', pasteSingleLine);
+        input.addEventListener('paste', (event) => pasteSingleLine(event, node));
         remove.addEventListener('click', () => { void deleteRow(node); });
         updateRow(node, item);
         return node;
       }
 
       function refreshActiveRow(node, item) {
-        if (node.refreshValue !== item.text && node.item.text !== item.text && !node.conflicted) return;
+        if (node.refreshValue !== item.text && node.item.text !== item.text && !node.conflicted && item.status === 'buffering') return;
         updateRow(node, item);
-        if (node.conflicted) {
+        if (node.conflicted || item.status !== 'buffering') {
           const input = node.querySelector('textarea');
           input.value = item.text;
           node.dirty = false;
@@ -382,11 +1080,22 @@
         node.conflicted = false;
       }
 
+      function isProtectedRow(node, active) {
+        if (node.item?.status !== 'buffering') return false;
+        return Boolean(node === active || node.focused || node.dirty || node.saving);
+      }
+
+      function pruneDetachedRows(keep, protectedRows) {
+        for (const node of [...elements.rows.children]) {
+          if (!keep.has(node) && (node.conflicted || !protectedRows.includes(node))) detachRow(node);
+        }
+      }
+
       function reconcile(items) {
         const active = document.activeElement?.closest?.('.row');
         const nodes = [...elements.rows.children];
         const existing = new Map(nodes.map((node) => [node.dataset.token, node]));
-        const protectedRows = nodes.filter((node) => node === active || node.dirty || node.saving);
+        const protectedRows = nodes.filter((node) => isProtectedRow(node, active));
         const keep = new Set();
         let position = 0;
         for (const item of items) {
@@ -401,39 +1110,52 @@
           updateRow(node, item);
           keep.add(node);
           const anchor = elements.rows.children[position];
-          if (node !== active && node !== anchor) elements.rows.insertBefore(node, anchor || null);
+          if (node !== active && !node.focused && node !== anchor) elements.rows.insertBefore(node, anchor || null);
           resize(node.querySelector('textarea'));
           position += 1;
         }
-        for (const node of [...elements.rows.children]) {
-          if (!keep.has(node) && (node.conflicted || !protectedRows.includes(node))) node.remove();
-        }
+        pruneDetachedRows(keep, protectedRows);
+        state.knownTokens = new Set(items.map((item) => item.token));
+        state.loadedOnce = true;
       }
+
       function applySnapshot(data) {
         state.registered = data.registered;
         updateAvailability();
         updateWarning(data.migrationWarning);
-        elements.empty.hidden = data.registered && data.items.length > 0;
-        elements.empty.textContent = data.registered ? '还没有灵感，随时记一条。' : '当前会话尚未登记，请确认项目已挂载 Fons；旧会话请新开会话或参照 README 登记。';
         if (!data.registered) {
           elements.rows.replaceChildren();
           state.etag = '';
-          state.deadline = 0;
-          state.flushPending = false;
-          updateCountdown();
+          state.heldId = null;
+          state.holdSentAt = 0;
+          updateCount(0);
+          showEmpty('当前会话尚未登记，请确认项目已挂载 Fons；旧会话请新开会话或参照 README 登记。');
+          updateWaterLevels();
           return;
         }
+        elements.empty.hidden = data.items.length > 0;
+        if (!data.items.length) showEmpty('还没有灵感，随时记一条。', 'idle');
         state.etag = data.etag;
-        state.deadline = Date.now() + Math.max(0, data.debounceRemainingMs || 0);
-        state.flushPending = !!data.flushPending;
+        state.debounceMs = data.debounceMs || DEFAULT_DEBOUNCE_MS;
+        updateCount(data.items.filter((item) => item.status !== 'done').length);
         elements.archive.disabled = !data.canArchive;
         reconcile(data.items);
-        updateCountdown();
+        updateWaterLevels();
+      }
+
+      function typingActive() {
+        return state.composing || Date.now() - state.lastTypedAt < TYPING_QUIET_MS;
+      }
+
+      function canPoll() {
+        if (document.hidden || state.workspace !== 'open' || workspaceMismatch()) return false;
+        if (!state.id || state.polling || state.busy) return false;
+        return state.refreshNeeded || !state.loadedOnce || !typingActive();
       }
 
       async function poll() {
         syncSession();
-        if (document.hidden || state.workspace !== 'open' || workspaceMismatch() || !state.id || state.polling || state.busy) return;
+        if (!canPoll()) return;
         const id = state.id;
         const epoch = state.epoch;
         const ticket = { id, epoch };
@@ -456,11 +1178,13 @@
           }
         }
       }
+
       async function addTexts(texts, expectedValue) {
         syncSession();
         const id = state.id;
         const session = state.session;
         if (!texts.length || !state.registered) return;
+        state.lastTypedAt = 0;
         elements.quick.value = '';
         resize(elements.quick);
         const result = await mutate('add', { texts }, id);
@@ -468,10 +1192,17 @@
         if (!result) {
           elements.quick.value = [expectedValue, elements.quick.value].filter(Boolean).join('\n');
           resize(elements.quick);
+        } else if (result.count > 1) {
+          showNotice(`已拆入 ${result.count} 条灵感`);
         }
       }
 
-      elements.quick.addEventListener('input', () => resize(elements.quick));
+      elements.quick.addEventListener('compositionstart', () => { state.composing = true; });
+      elements.quick.addEventListener('compositionend', () => { state.composing = false; state.lastTypedAt = Date.now(); });
+      elements.quick.addEventListener('input', () => {
+        state.lastTypedAt = Date.now();
+        resize(elements.quick);
+      });
       elements.quick.addEventListener('keydown', (event) => {
         if (event.isComposing || event.keyCode === 229 || event.key !== 'Enter') return;
         event.preventDefault();
@@ -488,16 +1219,28 @@
         resize(input);
         void addTexts(value.split(/\r\n|\r|\n/).map((line) => line.trim()).filter(Boolean), value);
       });
-      elements.flush.addEventListener('click', () => { void mutate('flush', {}).then((result) => { if (result) showNotice('将在下次模型调用时投递'); }); });
-      elements.archive.addEventListener('click', () => { void mutate('archive', {}); });
-      document.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(); });
-      if (typeof ResizeObserver !== 'undefined') {
+      if (elements.flowMode) {
+        elements.flowMode.addEventListener('click', () => {
+          applyFlowMode(state.flowMode === 'up' ? 'right' : 'up');
+        });
+      }
+      elements.archive.addEventListener('click', () => {
+        void mutate('archive', {}).then((result) => {
+          if (result?.count) showNotice(`已归档 ${result.count} 条灵感`);
+        });
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) syncHold();
+        else void poll();
+      });
+      if (!nativeAutoSize && typeof ResizeObserver !== 'undefined') {
         const observer = new ResizeObserver(() => {
           for (const textarea of document.querySelectorAll('textarea')) resize(textarea);
         });
         observer.observe(document.querySelector('.pool'));
       }
-      setInterval(() => { syncSession(); updateCountdown(); void poll(); }, 1500);
+      applyFlowMode(state.flowMode);
+      setInterval(() => { syncSession(); updateWaterLevels(); syncHold(); void poll(); }, 2000);
       syncSession();
       if (typeof window.sidecar?.onWorkspaceChange === 'function' && typeof window.sidecar?.fetch === 'function') {
         window.sidecar.onWorkspaceChange(workspaceChanged);

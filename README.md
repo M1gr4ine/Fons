@@ -1,12 +1,18 @@
+<p align="center">
+  <img src="assets/logo.svg" width="96" height="96" alt="Fons · 思如泉涌">
+</p>
+
 # Fons · 思如泉涌
 
-Fons 为 Antigravity 提供按会话隔离的灵感池。非紧急补充先记入收件箱，待消抖结束后在下一次模型调用时合并投递；紧急纠偏或叫停仍直接使用聊天框或停止按钮。
+Fons 为 Antigravity 提供按会话隔离的灵感蓄水池。非紧急补充先记入收件箱，每条灵感独立蓄水消抖，到期后在下一次模型调用时合并投递；紧急纠偏或叫停仍直接使用聊天框或停止按钮。
 
-## 使用灵感池
+## <img src="assets/sidebar-icon.svg" width="20" height="20" align="absmiddle" alt=""> 使用灵感池
 
-在会话右侧点击 **+ → Extensions → 灵感池**，面板自动绑定当前会话。No Project 会话只显示打开项目的提示；在已挂载 Fons 的项目会话中可以录入。底部速记行按 Enter 添加，粘贴多行时按非空行拆分；已有条目可编辑、勾选或删除。中文输入法选词时不会提交。
+在会话右侧点击 **+ → Extensions → 灵感池**，面板自动绑定当前会话。No Project 会话只显示打开项目的提示；在已挂载 Fons 的项目会话中可以录入。底部速记行按 Enter 添加，粘贴多行时按非空行拆分；中文输入法选词时不会提交。
 
-条目分为待投递、已投递和已完成。「投递」跳过当前消抖等待，在下一次模型调用时生效，不会唤醒空闲会话。「归档」整理已完成条目。删除已投递条目时会先确认，下一次模型调用将收到一次撤回通知。即使删除的是最后一条，待发通知也会保留到送达。 撤回后再写入相同文字会重新投递。如果同一次调用包含两条消息，模型先读到撤回，再读到标有“重新添加”的新条目；旧的确认编号随上一轮投递失效。
+条目分为待投递、已投递和已完成：
+- **待投递**：每条各自独立 `45s` 蓄水涨水位（顶栏可在「`↑ 水位` 自下而上」与「`→ 水位` 自左向右」之间切换），点进某条二次编辑时仅暂缓该条自身的计时，不影响其他已蓄满条目按时投递；修改保存后该条重新蓄水。
+- **已投递与已完成**：文本锁定只读不可直接改写。「归档」收拢并整理已完成条目。删除已投递条目时会先确认，下一次模型调用将收到一次撤回通知。即使删除的是最后一条，待发通知也会保留到送达。撤回后再写入相同文字会重新投递。如果同一次调用包含两条消息，模型先读到撤回，再读到标有“重新添加”的新条目；旧的确认编号随上一轮投递失效。
 
 模型有写权限时，根据注入消息里的本会话收件箱绝对路径，用 `edit_file` 只修改对应行的前缀。只读 Plan 模式的纯问答可在回复末行使用 `[FONS_ACK: 编号]` 确认实际回答的条目，不必为勾选退出只读模式。
 
@@ -36,20 +42,24 @@ Fons 为 Antigravity 提供按会话隔离的灵感池。非紧急补充先记�
 
 ## 安装与挂载
 
-推荐将 Hook 挂在目标工作区，面板单独挂到全局 Sidecar 目录。将示例中的 `F:\Fons` 换成实际仓库路径，在目标工作区运行以下 PowerShell 命令。
+推荐将 Hook 挂在目标工作区，并将纯 UI 面板包 `ui-plugin` 挂到全局 `plugins` 目录（这样侧边栏标签页会自动显示专属水珠图标，且不含全局 Hook，不会污染其他项目）。将示例中的 `F:\Fons` 换成实际仓库路径，在目标工作区运行以下 PowerShell 命令：
 
 ```powershell
 New-Item -ItemType Directory -Force .agents\plugins | Out-Null
 cmd /c mklink /J .agents\plugins\fons F:\Fons
 
-$sidecarsDir = Join-Path $env:USERPROFILE '.gemini\config\sidecars'
-New-Item -ItemType Directory -Force $sidecarsDir | Out-Null
-cmd /c mklink /J "$sidecarsDir\fons-pool" "F:\Fons\sidecars\fons-pool"
+# 若此前挂载过旧的独立 sidecars\fons-pool，请先移除避免菜单重复
+$oldSidecar = Join-Path $env:USERPROFILE '.gemini\config\sidecars\fons-pool'
+if (Test-Path -LiteralPath $oldSidecar) { cmd /c rmdir "$oldSidecar" }
+
+$pluginsDir = Join-Path $env:USERPROFILE '.gemini\config\plugins'
+New-Item -ItemType Directory -Force $pluginsDir | Out-Null
+cmd /c mklink /J "$pluginsDir\fons-pool" "F:\Fons\ui-plugin"
 ```
 
-在 Antigravity 的 `~/.gemini/config/config.json` 的 `sidecars` 对象中为 `fons-pool` 设置 `"enabled": true`。已有的其他条目请保留。启用后从会话的 Extensions 子菜单打开。
+挂载后可在 Antigravity 的 Customizations 页面确认「灵感池」已启用，并从会话右侧 **+ → Extensions → 灵感池** 打开面板（侧边栏标签将显示专属图标）。
 
-不要把整个 Fons 插件联接到 `~/.gemini/config/plugins/fons`。那会使 Hook 全局生效，并可能与工作区挂载重复执行。工作区联接方式支持空箱时的启动脚本短路。
+不要把仓库根目录 `F:\Fons` 直接联接到 `~/.gemini/config/plugins/fons`。根目录包含 `hooks.json`，全局挂载会使 Hook 在所有工作区生效并可能与工作区挂载重复执行；而 `ui-plugin` 仅包含面板与图标配置。工作区联接方式支持空箱时的启动脚本短路。
 
 也可在目标项目 `.agents/plugins.json` 中引用仓库的父目录，Antigravity 会按一层子目录扫描。此方式不满足工作区联接的短路前提。
 
@@ -96,12 +106,12 @@ fons --session $sessionId "另一条灵感"
 
 | 环境变量 | 默认值 | 用途 |
 | --- | --- | --- |
-| `FONS_DEBOUNCE_SEC` | `60` | 待投递文本集合的消抖秒数，`0` 表示不等待 |
+| `FONS_DEBOUNCE_SEC` | `45` | 每条待投递灵感的独立蓄水秒数，`0` 表示不等待 |
 | `FONS_SESSION` | 未设置 | 指定已登记的会话 UUID |
 | `FONS_ROOT` | 从当前目录向上查找 | 未指定会话时用于查找工作区候选 |
 | `FONS_APP_DATA` | `~/.gemini/antigravity` | CLI 使用的宿主数据目录，索引位于其 `fons/conversations` 下 |
 
-新增或改写待投递草稿会重新计时。勾选已投递条目或归档完成条目不会重置其他草稿的倒计时；提前勾选尚在缓冲的草稿会改变待投递集合，并为剩余草稿重新计时。
+每条待投递灵感各自独立计时，新增条目不会刷新先前草稿的进度；在面板中点进某条待投递灵感二次编辑时，仅暂缓该条自身计时，改写保存后该条重新计时。已投递和已完成条目不可直接编辑文本。
 
 ## 旧数据迁移
 
@@ -177,8 +187,8 @@ foreach ($target in $migrationOwner.targets) {
 
 ## 已知限制
 
-1. 投递和消抖到期只在下一次模型调用时生效，空闲会话不会被唤醒。
-2. 行编辑的最后一次比较和写入之间仍有很短的并发窗口；面板与 CLI 同时写 `.ui` 时，最坏可能丢失一次催投或取消勾选标记。
+1. 消抖到期只在下一次模型调用时生效，空闲会话不会被唤醒；本轮收尾（`Stop`）会自动兜底未处于编辑暂缓中的待投递条目。
+2. 行编辑的最后一次比较和写入之间仍有很短的并发窗口；面板与 CLI 同时写 `.ui` 时，最坏可能丢失一次暂缓续期或取消勾选标记。
 3. 在编辑器中直接修改前序行会改变后续行令牌，已追加的回执可能失配，对应条目重新显示为待办。面板和 CLI 的行编辑会折叠回执以规避这一问题。
 4. 宿主中删除会话后，相应 `ideas-<id>.md` 不会自动清理，需要手动归档或删除。
 

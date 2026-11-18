@@ -24,16 +24,21 @@ function deferred() {
 
 function harness({ host = true, secureFetch = true } = {}) {
   const elements = new Map();
-  for (const selector of ['.rows', '.empty', '[data-testid="fons-quick-add"]', '[data-testid="fons-countdown"]', '[data-testid="fons-flush"]', '[data-testid="fons-archive"]', '.warning', '.notice', '.pool']) elements.set(selector, new Element());
+  for (const selector of ['.rows', '.empty', '[data-testid="fons-quick-add"]', '[data-testid="fons-flow-mode"]', '[data-testid="fons-archive"]', '.warning', '.notice', '.pool']) elements.set(selector, new Element());
   const requests = [];
   let workspaceChange;
   let tick;
+  const storage = new Map();
+  const localStorage = {
+    getItem(key) { return storage.has(key) ? storage.get(key) : null; },
+    setItem(key, value) { storage.set(key, String(value)); },
+  };
   const sidecar = { conversationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', fetch(url, options) { const response = deferred(); requests.push({ url, options, ...response }); return response.promise; } };
   if (host) sidecar.onWorkspaceChange = (callback) => { workspaceChange = callback; return () => {}; };
   if (!secureFetch) delete sidecar.fetch;
   const document = { hidden: false, activeElement: null, querySelector: (selector) => elements.get(selector), querySelectorAll: () => [], createElement(tag) { const el = new Element(); el.tag = tag; return el; }, addEventListener() {} };
-  vm.runInNewContext(script, { window: { sidecar }, document, location: { search: '' }, URLSearchParams, Promise, Date, setTimeout: () => 0, clearTimeout() {}, setInterval: (callback) => { tick = callback; }, queueMicrotask, fetch: sidecar.fetch });
-  return { elements, requests, sidecar, workspace: (value) => workspaceChange(value), tick };
+  vm.runInNewContext(script, { window: { sidecar, localStorage }, document, location: { search: '' }, URLSearchParams, Promise, Date, setTimeout: () => 0, clearTimeout() {}, setInterval: (callback) => { tick = callback; }, queueMicrotask, fetch: sidecar.fetch });
+  return { elements, requests, sidecar, storage, workspace: (value) => workspaceChange(value), tick };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -91,8 +96,9 @@ test('missing host bridge is reported without calling the API', async () => {
 });
 
 const snapshot = (text = '原会话内容') => ({
-  registered: true, items: [{ token: 'token', status: 'buffering', text, raw: text, rowIndex: 0 }],
-  etag: 'etag-1', debounceRemainingMs: 0, flushPending: false, canArchive: false,
+  registered: true,
+  items: [{ id: '111111111111', token: 'token', status: 'buffering', text, raw: text, rowIndex: 0, remainingMs: 30000, editingHold: false }],
+  etag: 'etag-1', debounceMs: 45000, canArchive: false,
 });
 
 test('authorization failure clears previous content and the next poll reloads a full snapshot', async () => {
@@ -258,13 +264,13 @@ test('a previously seen session keeps its original workspace when revisited', as
   assert.equal(JSON.parse(panel.requests[2].options.body).conversationId, idA);
 });
 
-test('a successful flush cannot show its notice after switching during the refresh', async () => {
+test('archive notice does not leak across a session switch during refresh', async () => {
   const panel = harness();
   await openRegistered(panel);
-  panel.elements.get('[data-testid="fons-flush"]').listeners.click();
+  panel.elements.get('[data-testid="fons-archive"]').listeners.click();
   await settle();
-  assert.equal(panel.requests[1].url, '/api/pool/flush');
-  panel.requests[1].resolve(response({ flushRequestedAt: 1 }));
+  assert.equal(panel.requests[1].url, '/api/pool/archive');
+  panel.requests[1].resolve(response({ count: 2 }));
   await settle();
   assert.equal(panel.requests[2].url, '/api/pool');
   panel.sidecar.conversationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -272,21 +278,22 @@ test('a successful flush cannot show its notice after switching during the refre
   assert.equal(panel.requests.length, 4);
   panel.requests[2].resolve(response(snapshot()));
   await settle();
-  assert.doesNotMatch(panel.elements.get('.notice').textContent, /将在下次模型调用时投递/);
+  assert.doesNotMatch(panel.elements.get('.notice').textContent, /已归档/);
   panel.requests[3].resolve(response({ registered: false }));
   await settle();
 });
 
-test('a successful flush shows its notice when the session remains current', async () => {
+test('waterline flow toggle switches between upward and rightward water transforms and persists choice', async () => {
   const panel = harness();
   await openRegistered(panel);
-  panel.elements.get('[data-testid="fons-flush"]').listeners.click();
-  await settle();
-  panel.requests[1].resolve(response({ flushRequestedAt: 1 }));
-  await settle();
-  panel.requests[2].resolve(response(snapshot()));
-  await settle();
-  assert.match(panel.elements.get('.notice').textContent, /将在下次模型调用时投递/);
+  const [row] = panel.elements.get('.rows').children;
+  const water = row.querySelector('.row-water');
+  assert.equal(panel.elements.get('.pool').dataset.flow, 'up');
+  assert.match(water.style.transform, /^scaleY\(/);
+  panel.elements.get('[data-testid="fons-flow-mode"]').listeners.click();
+  assert.equal(panel.elements.get('.pool').dataset.flow, 'right');
+  assert.equal(panel.storage.get('fons.waterFlow'), 'right');
+  assert.match(water.style.transform, /^scaleX\(/);
 });
 
 test('an in-flight old edit conflict cannot notify the newly active conversation', async () => {
@@ -308,4 +315,89 @@ test('an in-flight old edit conflict cannot notify the newly active conversation
   await settle();
   assert.doesNotMatch(panel.elements.get('.notice').textContent, /内容已被修改/);
   assert.equal(panel.elements.get('.rows').children[0].item.text, 'B row');
+});
+
+test('per-row hold pauses only the focused buffering row while delivered and done rows stay read-only', async () => {
+  const panel = harness();
+  panel.workspace(['file:///project-a']);
+  panel.requests[0].resolve(response({
+    registered: true,
+    items: [
+      { id: 'aaaaaaaaaaaa', token: 't1', status: 'buffering', text: '草稿一', raw: '- [ ] 草稿一\n', rowIndex: 0, remainingMs: 30000, editingHold: false },
+      { id: 'bbbbbbbbbbbb', token: 't2', status: 'buffering', text: '草稿二', raw: '- [ ] 草稿二\n', rowIndex: 1, remainingMs: 15000, editingHold: false },
+      { id: 'cccccccccccc', token: 't3', status: 'delivered', text: '已投递项', raw: '- [ ] 已投递项\n', rowIndex: 2, remainingMs: 0, editingHold: false },
+      { id: 'dddddddddddd', token: 't4', status: 'done', text: '已完成项', raw: '【√】 已完成项\n', rowIndex: 3, remainingMs: 0, editingHold: false },
+    ],
+    etag: 'etag-multi-1', debounceMs: 45000, canArchive: true,
+  }));
+  await settle();
+  const [row1, row2, deliveredRow, doneRow] = panel.elements.get('.rows').children;
+  for (const r of [row1, row2, deliveredRow, doneRow]) r.isConnected = true;
+
+  assert.equal(row1.querySelector('textarea').readOnly, false);
+  assert.equal(deliveredRow.querySelector('textarea').readOnly, true);
+  assert.equal(doneRow.querySelector('textarea').readOnly, true);
+
+  deliveredRow.querySelector('textarea').listeners.focus();
+  await settle();
+  assert.equal(panel.requests.length, 1);
+
+  const input1 = row1.querySelector('textarea');
+  input1.listeners.focus();
+  await settle();
+  assert.equal(row1.dataset.holding, 'true');
+  assert.equal(row2.dataset.holding, undefined);
+  assert.equal(row1.querySelector('.row-timer').textContent, '暂缓');
+  assert.equal(row2.querySelector('.row-timer').textContent, '15s');
+  assert.equal(panel.requests[1].url, '/api/pool/hold');
+  assert.equal(JSON.parse(panel.requests[1].options.body).id, 'aaaaaaaaaaaa');
+  panel.requests[1].resolve(response({ editingHold: true, id: 'aaaaaaaaaaaa' }));
+  await settle();
+  panel.requests[2].resolve(response({ unchanged: true, etag: 'etag-multi-1' }));
+  await settle();
+
+  input1.listeners.blur();
+  await settle();
+  const releaseReq = panel.requests.find((req) => req.url === '/api/pool/release');
+  assert.ok(releaseReq, 'blur without changes sends release for that item');
+  assert.equal(JSON.parse(releaseReq.options.body).id, 'aaaaaaaaaaaa');
+});
+
+test('active typing skips background polling until quiet', async () => {
+  const panel = harness();
+  await openRegistered(panel);
+  const quick = panel.elements.get('[data-testid="fons-quick-add"]');
+  quick.value = '正在输入';
+  quick.listeners.input();
+  panel.tick();
+  await settle();
+  assert.equal(panel.requests.length, 1);
+});
+
+test('a conflicted blur edit still releases its active hold immediately', async () => {
+  const panel = harness();
+  await openRegistered(panel);
+  const [row] = panel.elements.get('.rows').children;
+  row.isConnected = true;
+  const input = row.querySelector('textarea');
+  input.listeners.focus();
+  await settle();
+  assert.equal(panel.requests[1].url, '/api/pool/hold');
+  panel.requests[1].resolve(response({ editingHold: true, id: '111111111111' }));
+  await settle();
+  panel.requests[2].resolve(response({ unchanged: true, etag: 'etag-1' }));
+  await settle();
+
+  input.value = 'conflicted edit';
+  input.listeners.input();
+  input.listeners.blur();
+  await settle();
+  assert.equal(panel.requests[3].url, '/api/pool/update');
+  panel.requests[3].resolve(response({ conflict: true }));
+  await settle();
+  panel.requests[4].resolve(response(snapshot('外部修改后内容')));
+  await settle();
+  const releaseReq = panel.requests.find((req) => req.url === '/api/pool/release');
+  assert.ok(releaseReq, 'conflicted blur still sends release');
+  assert.equal(JSON.parse(releaseReq.options.body).id, '111111111111');
 });

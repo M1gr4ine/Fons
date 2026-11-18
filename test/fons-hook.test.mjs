@@ -188,19 +188,19 @@ test("PreInvocation 消抖、合并编号、幂等去重与跨会话独立账本
     "- [x] 已完成忽略项",
   ].join("\n");
 
-  // 消抖窗口未满（5s < 60s）：不投递、不写账本
+  // 消抖窗口未满（5s < 45s）：不投递、记录每条起点
   writeIdeas(ws, ideasContent, 5);
   assert.deepEqual(
     runHook({ hookEventName: "PreInvocation", conversationId: "11111111-1111-4111-8111-111111111104", cwd: ws }),
     {}
   );
   const pendingState = JSON.parse(fs.readFileSync(path.join(ws, ".agents", "fons", ".state-11111111-1111-4111-8111-111111111104.json"), "utf8"));
-  assert.ok(pendingState.pendingSig);
+  assert.equal(Object.keys(pendingState.pendingAt ?? {}).length, 3);
   assert.equal(Object.keys(pendingState.delivered ?? {}).length, 0);
 
-  // 消抖窗口期满（65s >= 60s）：合并编号并写入 delivered
+  // 消抖窗口期满（65s >= 45s）：合并编号并写入 delivered
   writeIdeas(ws, ideasContent, 65);
-  pendingState.pendingSigAt -= 61000;
+  for (const key of Object.keys(pendingState.pendingAt)) pendingState.pendingAt[key] -= 61000;
   fs.writeFileSync(path.join(ws, ".agents", "fons", ".state-11111111-1111-4111-8111-111111111104.json"), JSON.stringify(pendingState));
   const firstOut = runHook({ hookEventName: "PreInvocation", conversationId: "11111111-1111-4111-8111-111111111104", cwd: ws });
   const msg = firstOut.injectSteps[0].systemMessage.systemMessage;
@@ -602,15 +602,19 @@ test('a readonly item reopened after an ACK cannot reuse its old token', (t) => 
   assert.match(retry.reason, /answer once/);
 });
 
-test('editing a delivered item causes the revised text to be delivered once', (t) => {
+test('delivered and completed items reject text edits while editing a buffering item delivers revised text once', (t) => {
   const ws = makeTempDir(t, HOOK_A);
-  writeIdeas(ws, '- [ ] initial', 70);
-  assert.match(deliver(ws, HOOK_A), /initial/);
+  writeIdeas(ws, '- [ ] initial\n- [ ] bufferingOne', 70);
   const ctx = { rootDir: ws, sessionId: HOOK_A };
-  const row = store.readPoolSnapshot(ctx).items[0];
-  store.updateIdeaText({ ...ctx, rowIndex: row.rowIndex, expectedRaw: row.raw, newText: 'revised' });
-  const message = runHook({ hookEventName: 'PreInvocation', conversationId: HOOK_A, cwd: ws }, { FONS_DEBOUNCE_SEC: '0' });
-  assert.match(message.injectSteps[0].systemMessage.systemMessage, /revised/);
+  const before = store.readPoolSnapshot(ctx).items;
+  const bufferingRow = before.find((row) => row.text === 'bufferingOne');
+  assert.equal(store.updateIdeaText({ ...ctx, rowIndex: bufferingRow.rowIndex, expectedRaw: bufferingRow.raw, newText: 'revised' }).conflict, false);
+  writeIdeas(ws, fs.readFileSync(store.sessionPaths(ctx).ideas, 'utf8'), 70);
+  const msg = deliver(ws, HOOK_A);
+  assert.match(msg, /initial/);
+  assert.match(msg, /revised/);
+  const deliveredRow = store.readPoolSnapshot(ctx).items.find((row) => row.text === 'initial');
+  assert.deepEqual(store.updateIdeaText({ ...ctx, rowIndex: deliveredRow.rowIndex, expectedRaw: deliveredRow.raw, newText: 'blocked' }), { conflict: true, locked: true });
   assert.deepEqual(runHook({ hookEventName: 'PreInvocation', conversationId: HOOK_A, cwd: ws }, { FONS_DEBOUNCE_SEC: '0' }), {});
 });
 
@@ -633,30 +637,35 @@ test('a retained migration lock leaves another session PreInvocation and Stop op
   assert.equal(fs.existsSync(lock), true);
 });
 
-test('countdown follows the same pending signature as Hook and flush delivers immediately', (t) => {
+test('each pending item keeps its own timer when new items arrive or delivered items are archived', (t) => {
   const ws = makeTempDir(t, HOOK_A);
   const ctx = { rootDir: ws, sessionId: HOOK_A };
   writeIdeas(ws, '- [ ] sent', 70);
   assert.match(deliver(ws, HOOK_A), /sent/);
-  store.addIdeas({ ...ctx, texts: ['draft'] });
+  store.addIdeas({ ...ctx, texts: ['draftOne'] });
   const pre = { hookEventName: 'PreInvocation', conversationId: HOOK_A, cwd: ws };
   assert.deepEqual(runHook(pre), {});
   const statePath = store.sessionPaths(ctx).state;
-  const before = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  const firstId = store.readPoolSnapshot(ctx).items.find((row) => row.text === 'draftOne').id;
+  const beforeAt = JSON.parse(fs.readFileSync(statePath, 'utf8')).pendingAt[firstId];
+  assert.ok(beforeAt > 0);
   const snap = store.readPoolSnapshot(ctx);
-  assert.ok(snap.debounceRemainingMs > 0 && snap.debounceRemainingMs <= 60000);
+  const draftSnap = snap.items.find((row) => row.id === firstId);
+  assert.ok(draftSnap.remainingMs > 0 && draftSnap.remainingMs <= 45000);
   const delivered = snap.items.find((row) => row.text === 'sent');
   store.completeIdea({ ...ctx, token: delivered.token });
   assert.deepEqual(runHook(pre), {});
   archiveCompleted(ctx);
+  store.addIdeas({ ...ctx, texts: ['draftTwo'] });
   assert.deepEqual(runHook(pre), {});
-  const after = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-  assert.equal(after.pendingSigAt, before.pendingSigAt);
-  assert.equal(after.pendingSig, before.pendingSig);
-  store.requestFlush(ctx);
-  assert.equal(store.readPoolSnapshot(ctx).debounceRemainingMs, 0);
-  assert.match(runHook(pre).injectSteps[0].systemMessage.systemMessage, /draft/);
-  assert.equal(store.readPoolSnapshot(ctx).flushPending, false);
+  const afterState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  assert.equal(afterState.pendingAt[firstId], beforeAt);
+  afterState.pendingAt[firstId] = Date.now() - 46000;
+  fs.writeFileSync(statePath, JSON.stringify(afterState));
+  const partialMsg = runHook(pre).injectSteps[0].systemMessage.systemMessage;
+  assert.match(partialMsg, /draftOne/);
+  assert.doesNotMatch(partialMsg, /draftTwo/);
+  assert.equal(store.readPoolSnapshot(ctx).items.find((row) => row.text === 'draftTwo').status, 'buffering');
 });
 
 test('launcher sends a last-item retraction once and then resumes empty fast exit', { skip: process.platform !== 'win32' }, (t) => {
@@ -729,10 +738,11 @@ test('Hook migration preserves a delivered item without injecting it again', (t)
   assert.equal(fs.existsSync(path.join(dir, 'ideas.md')), false);
 });
 
-test('a concurrent flush does not lose Hook delivery or UI state', async (t) => {
+test('a concurrent hold on another item does not lose Hook delivery or UI state', async (t) => {
   const ws = makeTempDir(t, HOOK_A);
   const ctx = { rootDir: ws, sessionId: HOOK_A };
-  writeIdeas(ws, '- [ ] parallel', 70);
+  writeIdeas(ws, '- [ ] parallel\n- [ ] editingLater', 70);
+  const laterId = store.readPoolSnapshot(ctx).items.find((row) => row.text === 'editingLater').id;
   const proc = spawn(process.execPath, [HOOK_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, FONS_DEBOUNCE_SEC: '0' } });
   let output = '';
   let stderr = '';
@@ -743,8 +753,8 @@ test('a concurrent flush does not lose Hook delivery or UI state', async (t) => 
     proc.once('close', (code) => resolve(code));
   });
   const storeUrl = new URL('../scripts/fons-store.mjs', import.meta.url).href;
-  const uiScript = `import { requestFlush } from ${JSON.stringify(storeUrl)}; requestFlush({ rootDir: process.argv[1], sessionId: process.argv[2] });`;
-  const ui = spawn(process.execPath, ['--input-type=module', '-e', uiScript, ws, HOOK_A], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const uiScript = `import { holdEditing } from ${JSON.stringify(storeUrl)}; holdEditing({ rootDir: process.argv[1], sessionId: process.argv[2], id: process.argv[3] });`;
+  const ui = spawn(process.execPath, ['--input-type=module', '-e', uiScript, ws, HOOK_A, laterId], { stdio: ['ignore', 'ignore', 'pipe'] });
   let uiError = '';
   ui.stderr.on('data', (part) => { uiError += part; });
   const uiDone = new Promise((resolve, reject) => {
@@ -758,7 +768,7 @@ test('a concurrent flush does not lose Hook delivery or UI state', async (t) => 
   assert.match(JSON.parse(output).injectSteps[0].systemMessage.systemMessage, /parallel/);
   const files = store.sessionPaths(ctx);
   assert.ok(Object.keys(JSON.parse(fs.readFileSync(files.state, 'utf8')).delivered).length);
-  assert.ok(JSON.parse(fs.readFileSync(files.ui, 'utf8')).flushRequestedAt > 0);
+  assert.equal(fs.existsSync(files.ui), true);
 });
 
 function itemFor(ctx, text) {
@@ -850,29 +860,65 @@ test('model completion preserves another draft timer and editing that draft rese
   store.addIdeas({ ...ctx, texts: ['sent'] });
   assert.match(preNow(ctx).injectSteps[0].systemMessage.systemMessage, /sent/);
   store.addIdeas({ ...ctx, texts: ['draft'] });
+  const draftId = store.readPoolSnapshot(ctx).items.find((row) => row.text === 'draft').id;
   const initialMtime = new Date(Date.now() - 30000);
   fs.utimesSync(paths.ideas, initialMtime, initialMtime);
   assert.deepEqual(runHook(pre), {});
   const initial = JSON.parse(fs.readFileSync(paths.state, 'utf8'));
-  assert.equal(initial.pendingSigAt, fs.statSync(paths.ideas).mtimeMs);
+  assert.equal(initial.pendingAt[draftId], fs.statSync(paths.ideas).mtimeMs);
   fs.writeFileSync(paths.ideas, '【√】 sent\n- [ ] draft\n');
   const completionMtime = new Date(Date.now() - 15000);
   fs.utimesSync(paths.ideas, completionMtime, completionMtime);
   assert.deepEqual(runHook(pre), {});
   const afterCompletion = JSON.parse(fs.readFileSync(paths.state, 'utf8'));
-  assert.equal(afterCompletion.pendingSig, initial.pendingSig);
-  assert.equal(afterCompletion.pendingSigAt, initial.pendingSigAt);
+  assert.equal(afterCompletion.pendingAt[draftId], initial.pendingAt[draftId]);
   fs.writeFileSync(paths.ideas, '【√】 sent\n- [ ] revised draft\n');
+  const revisedId = store.readPoolSnapshot(ctx).items.find((row) => row.text === 'revised draft').id;
   const editMtime = new Date(Date.now() - 5000);
   fs.utimesSync(paths.ideas, editMtime, editMtime);
   const expectedAt = fs.statSync(paths.ideas).mtimeMs;
   assert.deepEqual(runHook(pre), {});
   const afterEdit = JSON.parse(fs.readFileSync(paths.state, 'utf8'));
-  assert.notEqual(afterEdit.pendingSig, initial.pendingSig);
-  assert.equal(afterEdit.pendingSigAt, expectedAt);
-  assert.ok(afterEdit.pendingSigAt > initial.pendingSigAt);
-  const snapshot = store.readPoolSnapshot({ ...ctx, debounceMs: 60000, now: expectedAt + 2000 });
-  assert.equal(snapshot.debounceRemainingMs, 58000);
+  assert.equal(afterEdit.pendingAt[draftId], undefined);
+  assert.equal(afterEdit.pendingAt[revisedId], expectedAt);
+  assert.ok(afterEdit.pendingAt[revisedId] > initial.pendingAt[draftId]);
+  const snapshot = store.readPoolSnapshot({ ...ctx, debounceMs: 45000, now: expectedAt + 2000 });
+  assert.equal(snapshot.items.find((item) => item.id === revisedId).remainingMs, 43000);
   assert.equal(snapshot.items.find((item) => item.text === 'sent').status, 'done');
   assert.equal(snapshot.items.find((item) => item.text === 'revised draft').status, 'buffering');
+});
+
+test('per-item 45s debounce and single-item hold defer only the held item in PreInvocation and Stop', (t) => {
+  const ws = makeTempDir(t, HOOK_A);
+  const ctx = { rootDir: ws, sessionId: HOOK_A };
+  const pre = { hookEventName: 'PreInvocation', cwd: ws, conversationId: HOOK_A };
+
+  writeIdeas(ws, '- [ ] readyItem\n- [ ] heldItem', 40);
+  assert.deepEqual(runHook(pre), {});
+
+  const snap = store.readPoolSnapshot(ctx);
+  const readyId = snap.items.find((row) => row.text === 'readyItem').id;
+  const heldId = snap.items.find((row) => row.text === 'heldItem').id;
+  writeIdeas(ws, '- [ ] readyItem\n- [ ] heldItem', 46);
+  const paths = store.sessionPaths(ctx);
+  const state = JSON.parse(fs.readFileSync(paths.state, 'utf8'));
+  state.pendingAt[readyId] = Date.now() - 46000;
+  state.pendingAt[heldId] = Date.now() - 46000;
+  fs.writeFileSync(paths.state, JSON.stringify(state));
+
+  store.holdEditing({ ...ctx, id: heldId });
+  const firstDelivery = runHook(pre).injectSteps[0].systemMessage.systemMessage;
+  assert.match(firstDelivery, /readyItem/);
+  assert.doesNotMatch(firstDelivery, /heldItem/);
+
+  const readyAck = ackToken(firstDelivery);
+  const transcriptPath = writeTranscript(ws, 'held-stop.jsonl', [userStep, answer(`done\n[FONS_ACK: ${readyAck}]`)]);
+  assert.deepEqual(runStop(ws, HOOK_A, { transcriptPath }), { decision: 'allow' });
+  const syncedState = JSON.parse(fs.readFileSync(paths.state, 'utf8'));
+  assert.equal(syncedState.pendingAt[readyId], undefined);
+  assert.ok(syncedState.pendingAt[heldId]);
+
+  store.releaseEditing({ ...ctx, id: heldId });
+  const secondDelivery = runHook(pre).injectSteps[0].systemMessage.systemMessage;
+  assert.match(secondDelivery, /heldItem/);
 });

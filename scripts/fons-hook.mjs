@@ -108,20 +108,29 @@ function clearRetractionMarker({ paths, state }) {
   if (unnotified(readJson(paths.ui), state).length) fs.closeSync(fs.openSync(paths.retractMarker, "a"));
 }
 
-function handlePreInvocation(data) {
-  const { pending, sig, pendingSigAt, debounceRemainingMs } = computeDebounce(data);
-  const { state, paths } = data;
-  const messages = [];
-  if (pending.length || state.pendingSig !== undefined) {
-    state.pendingSig = sig;
-    state.pendingSigAt = pendingSigAt;
+function syncPendingLedger(state, pendingAt, deliveredIds) {
+  const next = {};
+  for (const [id, since] of Object.entries(pendingAt)) {
+    if (!deliveredIds.has(id)) next[id] = since;
   }
-  if (pending.length && debounceRemainingMs <= 0) {
-    const numbered = markDelivered(pending, data);
+  if (Object.keys(next).length) state.pendingAt = next;
+  else delete state.pendingAt;
+  delete state.pendingSig;
+  delete state.pendingSigAt;
+}
+
+function handlePreInvocation(data) {
+  const { ready, pendingAt } = computeDebounce(data);
+  const { state, paths } = data;
+  const deliveredIds = new Set();
+  const messages = [];
+  if (ready.length) {
+    const numbered = markDelivered(ready, data);
+    for (const item of ready) deliveredIds.add(item.id);
     messages.push("[FONS] 以下是用户的非紧急补充。请先完成当前编辑和验证，再统一处理。\n" +
       handlingInstructions(paths.ideas) + "\n" + numbered);
-    state.pendingSig = computeDebounce({ ...data, items: [] }).sig;
   }
+  syncPendingLedger(state, pendingAt, deliveredIds);
   const retracted = collectRetractions(data);
   if (retracted) messages.unshift(retracted);
   if (!messages.length) return {};
@@ -146,11 +155,21 @@ function stillUnconfirmed(items, data, transcriptPath) {
 
 function handleStop(input, data) {
   const { state, ui, items } = data;
-  const open = items.filter((item) => item.status !== "done");
-  if (!open.length) return { decision: "allow" };
+  const timing = computeDebounce(data);
+  const open = items.filter((item) => {
+    if (item.status === "done") return false;
+    return !(item.status === "buffering" && timing.byId.get(item.id)?.editingHold);
+  });
+  if (!open.length) {
+    syncPendingLedger(state, timing.pendingAt, new Set());
+    return { decision: "allow" };
+  }
   const distinct = new Map(open.map((item) => [item.id, item]));
   const remaining = stillUnconfirmed(distinct.values(), data, input.transcriptPath);
-  if (!remaining.length) return { decision: "allow" };
+  if (!remaining.length) {
+    syncPendingLedger(state, timing.pendingAt, new Set());
+    return { decision: "allow" };
+  }
 
   const signature = remaining.map(({ id }) => {
     const withdrawn = ui.retracted?.[id];
@@ -159,12 +178,13 @@ function handleStop(input, data) {
   const previousCount = state.stopCount ?? 0;
   const count = input.continuationActive ? previousCount : 0;
   if (count >= MAX_STOP_CONTINUES || (input.continuationActive && state.lastStopSig === signature)) {
+    syncPendingLedger(state, timing.pendingAt, new Set());
     return { decision: "allow" };
   }
   state.lastStopSig = signature;
   state.stopCount = count + 1;
   const numbered = markDelivered(remaining, data);
-  state.pendingSig = computeDebounce({ ...data, items: [] }).sig;
+  syncPendingLedger(state, timing.pendingAt, new Set(remaining.map((item) => item.id)));
   const reminder = "[FONS 收尾核对] 以下补充条目仍需回应或标记完成。\n" +
     handlingInstructions(data.paths.ideas) + "\n" + numbered;
   const reason = [collectRetractions(data), reminder].filter(Boolean).join("\n\n");
