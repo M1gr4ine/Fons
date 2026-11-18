@@ -1,19 +1,18 @@
-import fs from "node:fs";
-import path from "node:path";
-import { parseActiveItems } from "./fons-hook.mjs";
+import fs from 'node:fs';
+import path from 'node:path';
+import { COMPLETED_PREFIX, isCompletedLine, parseInbox } from './fons-inbox.mjs';
 
 const USAGE = `用法:
-  fons "<灵感内容>"   向 .agents/fons/ideas.md 追加待办条目
-  fons list           查看当前未处理条目
-  fons archive        将已标 - [x] 的条目归档至 archive.md
-  fons help           显示帮助`;
+  fons "<灵感内容>"     向 .agents/fons/ideas.md 追加待办条目
+  fons list             查看待处理条目及其确认令牌
+  fons done <令牌...>   仅确认指定条目（【√】）
+  fons archive          归档已完成条目（归档期间请勿编辑 ideas.md）
+  fons help             显示帮助`;
 
 function findWorkspaceRoot(startDir) {
   let dir = path.resolve(startDir);
   while (true) {
-    if (fs.existsSync(path.join(dir, ".agents")) || fs.existsSync(path.join(dir, ".git"))) {
-      return dir;
-    }
+    if (fs.existsSync(path.join(dir, '.agents')) || fs.existsSync(path.join(dir, '.git'))) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return path.resolve(startDir);
     dir = parent;
@@ -21,116 +20,103 @@ function findWorkspaceRoot(startDir) {
 }
 
 function resolvePaths() {
-  const root = process.env.FONS_ROOT?.trim()
-    ? path.resolve(process.env.FONS_ROOT.trim())
-    : findWorkspaceRoot(process.cwd());
-  const fonsDir = path.join(root, ".agents", "fons");
-  return {
-    fonsDir,
-    ideasPath: path.join(fonsDir, "ideas.md"),
-    archivePath: path.join(fonsDir, "archive.md"),
-  };
+  const explicitRoot = process.env.FONS_ROOT?.trim();
+  const root = explicitRoot ? path.resolve(explicitRoot) : findWorkspaceRoot(process.cwd());
+  const fonsDir = path.join(root, '.agents', 'fons');
+  return { fonsDir, ideasPath: path.join(fonsDir, 'ideas.md'), archivePath: path.join(fonsDir, 'archive.md') };
 }
 
-function appendLinesWithNewline(filePath, linesText) {
-  let prefix = "";
-  if (fs.existsSync(filePath)) {
-    const existing = fs.readFileSync(filePath, "utf8");
-    if (existing.length > 0 && !existing.endsWith("\n")) {
-      prefix = "\n";
-    }
-  }
-  fs.appendFileSync(filePath, prefix + linesText, "utf8");
+function detectEol(text) {
+  return text.includes('\r\n') ? '\r\n' : '\n';
+}
+
+function readContent(filePath) {
+  return fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+}
+
+function appendLinesWithNewline(filePath, lines) {
+  const existing = readContent(filePath);
+  const eol = detectEol(existing);
+  const prefix = existing && !existing.endsWith('\n') ? eol : '';
+  fs.appendFileSync(filePath, prefix + lines.join(eol) + eol, 'utf8');
 }
 
 function cmdList(ideasPath) {
-  if (!fs.existsSync(ideasPath)) {
-    process.stdout.write("当前无待处理灵感。\n");
+  const { activeItems } = parseInbox(readContent(ideasPath));
+  if (!activeItems.length) {
+    process.stdout.write('当前无待处理灵感。\n');
     return;
   }
-  const items = parseActiveItems(fs.readFileSync(ideasPath, "utf8"));
-  if (items.length === 0) {
-    process.stdout.write("当前无待处理灵感。\n");
-    return;
-  }
-  const output = items.map((item, i) => `${i + 1}. ${item.text}`).join("\n");
-  process.stdout.write(output + "\n");
+  process.stdout.write(activeItems.map((item, i) => `${i + 1}. ${item.text} [${item.token}]`).join('\n') + '\n');
 }
 
-function cmdArchive(fonsDir, ideasPath, archivePath) {
-  if (!fs.existsSync(ideasPath)) {
-    process.stdout.write("当前无可归档条目。\n");
-    return;
-  }
-
-  const content = fs.readFileSync(ideasPath, "utf8");
-  if (content.length === 0) {
-    process.stdout.write("当前无可归档条目。\n");
-    return;
-  }
-
-  const lines = content.replace(/\r?\n$/, "").split(/\r?\n/);
-  const doneLines = [];
-  const keptLines = [];
-
-  for (const line of lines) {
-    if (/^\s*[-*]\s*\[[xX]\]/.test(line)) {
-      doneLines.push(line);
-    } else {
-      keptLines.push(line);
-    }
-  }
-
-  if (doneLines.length === 0) {
-    process.stdout.write("当前无可归档条目。\n");
-    return;
-  }
-
-  fs.mkdirSync(fonsDir, { recursive: true });
-  appendLinesWithNewline(archivePath, doneLines.join("\n") + "\n");
-
-  // 仅剩空白行时写为空文件（0 字节），恢复 run-hook.cmd 的零字节快路径
-  const hasContent = keptLines.some((line) => line.trim() !== "");
-  fs.writeFileSync(ideasPath, hasContent ? keptLines.join("\n") + "\n" : "", "utf8");
-
-  process.stdout.write(`已归档 ${doneLines.length} 条已完成灵感。\n`);
+function cmdDone(ideasPath, tokens) {
+  if (!tokens.length) throw new Error('请先运行 fons list，再指定已处理条目的令牌。');
+  if (new Set(tokens).size !== tokens.length) throw new Error('确认令牌重复。');
+  const content = readContent(ideasPath);
+  const { activeItems } = parseInbox(content);
+  const byToken = new Map(activeItems.map((item) => [item.token, item]));
+  const selected = tokens.map((token) => byToken.get(token));
+  if (selected.some((item) => !item)) throw new Error('确认令牌无效或条目已变化，请重新运行 fons list。');
+  const eol = detectEol(content);
+  const receipts = selected.map((item) => `${COMPLETED_PREFIX}${item.text} <!-- fons-ack:${item.token} -->`);
+  // Always start a new line: another writer may have appended after our read.
+  fs.appendFileSync(ideasPath, eol + receipts.join(eol) + eol, 'utf8');
+  process.stdout.write(`已确认 ${selected.length} 条灵感（【√】）。\n`);
 }
 
-function cmdAdd(fonsDir, ideasPath, rawArgs) {
-  const text = rawArgs
-    .join(" ")
-    .trim()
-    .replace(/^[-*]\s*\[\s*\]\s*/, "")
-    .trim();
-
-  if (!text) {
-    process.stderr.write("错误：灵感内容不能为空。\n");
-    process.exit(1);
+function archiveRows(rows) {
+  const done = [];
+  const kept = [];
+  for (const row of rows) {
+    if (row.completed) done.push(`${COMPLETED_PREFIX}${row.text}`);
+    else if (row.receipt) continue;
+    else if (isCompletedLine(row.body) && !row.body.includes('<!-- fons-ack:')) done.push(row.body);
+    else kept.push(row.raw);
   }
+  while (kept.length && !kept.at(-1).trim()) kept.pop();
+  return { done, kept: kept.join('') };
+}
 
-  fs.mkdirSync(fonsDir, { recursive: true });
-  appendLinesWithNewline(ideasPath, `- [ ] ${text}\n`);
+function cmdArchive(paths) {
+  const content = readContent(paths.ideasPath);
+  const { done, kept } = archiveRows(parseInbox(content).rows);
+  if (!done.length) {
+    process.stdout.write('当前无可归档条目。\n');
+    return;
+  }
+  if (readContent(paths.ideasPath) !== content) throw new Error('ideas.md 已变化，请停止编辑后重试归档。');
+  fs.mkdirSync(paths.fonsDir, { recursive: true });
+  appendLinesWithNewline(paths.archivePath, done);
+  if (readContent(paths.ideasPath) !== content) {
+    throw new Error('已写入 archive.md，但 ideas.md 已变化，未清理收件箱；重试可能重复归档。');
+  }
+  fs.writeFileSync(paths.ideasPath, kept.trim() ? kept : '', 'utf8');
+  process.stdout.write(`已归档 ${done.length} 条已完成灵感。\n`);
+}
+
+function cmdAdd(paths, rawArgs) {
+  const text = rawArgs.join(' ').trim().replace(/^[-*]\s*\[\s*\]\s*/, '').trim();
+  if (!text) throw new Error('灵感内容不能为空。');
+  fs.mkdirSync(paths.fonsDir, { recursive: true });
+  appendLinesWithNewline(paths.ideasPath, [`- [ ] ${text}`]);
   process.stdout.write(`已记录灵感：${text}\n`);
 }
 
 const args = process.argv.slice(2);
-
-if (args.length === 0) {
-  process.stderr.write(USAGE + "\n");
-  process.exit(1);
-}
-
-if (args.length === 1 && (args[0] === "help" || args[0] === "--help" || args[0] === "-h")) {
-  process.stdout.write(USAGE + "\n");
-  process.exit(0);
-}
-
-const { fonsDir, ideasPath, archivePath } = resolvePaths();
-
-if (args.length === 1 && args[0] === "list") {
-  cmdList(ideasPath);
-} else if (args.length === 1 && args[0] === "archive") {
-  cmdArchive(fonsDir, ideasPath, archivePath);
-} else {
-  cmdAdd(fonsDir, ideasPath, args);
+try {
+  if (!args.length) throw new Error(USAGE);
+  if (args.length === 1 && ['help', '--help', '-h'].includes(args[0])) process.stdout.write(USAGE + '\n');
+  else {
+    const paths = resolvePaths();
+    if (args[0] === 'list' && args.length === 1) cmdList(paths.ideasPath);
+    else if (args[0] === 'done') cmdDone(paths.ideasPath, args.slice(1));
+    else if (args[0] === 'archive') {
+      if (args.length !== 1) throw new Error(`不支持的参数 "${args.slice(1).join(' ')}"。`);
+      cmdArchive(paths);
+    } else cmdAdd(paths, args);
+  }
+} catch (err) {
+  process.stderr.write(`错误：${err.message}\n`);
+  process.exitCode = 1;
 }

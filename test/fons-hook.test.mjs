@@ -40,6 +40,18 @@ function runHook(payload, env = {}) {
   return JSON.parse(res.stdout);
 }
 
+function runStop(cwd, conversationId, overrides = {}) {
+  return runHook({
+    hookEventName: "Stop",
+    conversationId,
+    cwd,
+    terminationReason: "NO_TOOL_CALL",
+    fullyIdle: true,
+    continuationActive: false,
+    ...overrides,
+  });
+}
+
 function runHookCmd(pluginDir, eventName, payload, env = {}) {
   const res = spawnSync("cmd.exe", ["/c", `scripts\\run-hook.cmd ${eventName}`], {
     cwd: pluginDir,
@@ -69,21 +81,13 @@ function runCli(args, { cwd, env = {} } = {}) {
 test("空收件箱、零字节与全完成/无效行均安全放行", (t) => {
   const ws = makeTempDir(t);
   const preInput = { hookEventName: "PreInvocation", conversationId: "c1", cwd: ws };
-  const stopInput = {
-    hookEventName: "Stop",
-    conversationId: "c1",
-    cwd: ws,
-    terminationReason: "NO_TOOL_CALL",
-    fullyIdle: true,
-    continuationActive: false,
-  };
 
   assert.deepEqual(runHook(preInput), {});
-  assert.deepEqual(runHook(stopInput), { decision: "allow" });
+  assert.deepEqual(runStop(ws, "c1"), { decision: "allow" });
 
   writeIdeas(ws, "", 120);
   assert.deepEqual(runHook(preInput), {});
-  assert.deepEqual(runHook(stopInput), { decision: "allow" });
+  assert.deepEqual(runStop(ws, "c1"), { decision: "allow" });
 
   writeIdeas(
     ws,
@@ -93,14 +97,23 @@ test("空收件箱、零字节与全完成/无效行均安全放行", (t) => {
       "-",
       "*",
       "- [ ]   ",
-      "- [x] 已完成条目一",
-      "- [X] 已完成条目二",
-      "* [x] 已完成条目三",
+      "- [√] 已完成条目一",
+      "* [√] 已完成条目二",
+      "[√] 已完成条目三",
+      "【√】已完成条目四",
+      "- 【√】已完成条目五",
+      "- [✓] 已完成条目六",
+      "- [✔] 已完成条目七",
+      "✓ 裸勾号已完成条目",
+      "- ✓ 列表裸勾号条目",
+      "- [x] 历史完成条目八",
+      "- [X] 历史完成条目九",
+      "* [x] 历史完成条目十",
     ].join("\n"),
     120
   );
   assert.deepEqual(runHook(preInput), {});
-  assert.deepEqual(runHook(stopInput), { decision: "allow" });
+  assert.deepEqual(runStop(ws, "c1"), { decision: "allow" });
 });
 
 test("Windows run-hook.cmd 空箱短路与全局安装隔离", { skip: process.platform !== "win32" }, (t) => {
@@ -113,6 +126,8 @@ test("Windows run-hook.cmd 空箱短路与全局安装隔离", { skip: process.p
   fs.copyFileSync(HOOKS_JSON, path.join(localPluginDir, "hooks.json"));
   fs.copyFileSync(RUN_HOOK_CMD, path.join(localPluginDir, "scripts", "run-hook.cmd"));
   fs.copyFileSync(HOOK_SCRIPT, path.join(localPluginDir, "scripts", "fons-hook.mjs"));
+  fs.copyFileSync(path.join(path.dirname(HOOK_SCRIPT), "fons-inbox.mjs"),
+    path.join(localPluginDir, "scripts", "fons-inbox.mjs"));
 
   assert.deepEqual(
     runHookCmd(localPluginDir, "PreInvocation", {
@@ -139,6 +154,8 @@ test("Windows run-hook.cmd 空箱短路与全局安装隔离", { skip: process.p
   fs.copyFileSync(HOOKS_JSON, path.join(globalPluginDir, "hooks.json"));
   fs.copyFileSync(RUN_HOOK_CMD, path.join(globalPluginDir, "scripts", "run-hook.cmd"));
   fs.copyFileSync(HOOK_SCRIPT, path.join(globalPluginDir, "scripts", "fons-hook.mjs"));
+  fs.copyFileSync(path.join(path.dirname(HOOK_SCRIPT), "fons-inbox.mjs"),
+    path.join(globalPluginDir, "scripts", "fons-inbox.mjs"));
 
   const targetWs = path.join(root, "target-ws");
   writeIdeas(targetWs, "- [ ] 补充全局安装隔离测试", 70);
@@ -176,9 +193,13 @@ test("PreInvocation 消抖、合并编号、幂等去重与跨会话独立账本
   const firstOut = runHook({ hookEventName: "PreInvocation", conversationId: "s1", cwd: ws });
   const msg = firstOut.injectSteps[0].systemMessage.systemMessage;
   assert.match(msg, /^\[FONS\]/);
+  assert.match(msg, /【√】/);
+  assert.match(msg, /edit_file/);
+  assert.match(msg, /write_file/);
+  assert.match(msg, /exit_plan_mode/);
   assert.match(
     msg,
-    /1\. 导出接口补充 created_at 字段\n2\. 增加导出权限校验\n3\. 补充错误码文档$/
+    /1\. 导出接口补充 created_at 字段 \[FONS:[a-f0-9]{16}\]\n2\. 增加导出权限校验 \[FONS:[a-f0-9]{16}\]\n3\. 补充错误码文档/
   );
 
   // 同会话二次调用不重复注入
@@ -191,12 +212,12 @@ test("PreInvocation 消抖、合并编号、幂等去重与跨会话独立账本
   writeIdeas(ws, `${ideasContent}\n- [ ] 新增第四条灵感`, 65);
   const deltaOut = runHook({ hookEventName: "PreInvocation", conversationId: "s1", cwd: ws });
   const deltaMsg = deltaOut.injectSteps[0].systemMessage.systemMessage;
-  assert.match(deltaMsg, /1\. 新增第四条灵感$/);
+  assert.match(deltaMsg, /1\. 新增第四条灵感 /);
   assert.doesNotMatch(deltaMsg, /created_at/);
 
   // 换新会话：独立账本重新完整投递
   const newConvOut = runHook({ hookEventName: "PreInvocation", conversationId: "s2", cwd: ws });
-  assert.match(newConvOut.injectSteps[0].systemMessage.systemMessage, /4\. 新增第四条灵感$/);
+  assert.match(newConvOut.injectSteps[0].systemMessage.systemMessage, /4\. 新增第四条灵感 /);
 
   // FONS_DEBOUNCE_SEC=0 时立即投递
   writeIdeas(ws, "- [ ] 零秒消抖即时测试", 0);
@@ -204,7 +225,7 @@ test("PreInvocation 消抖、合并编号、幂等去重与跨会话独立账本
     { hookEventName: "PreInvocation", conversationId: "s3", cwd: ws },
     { FONS_DEBOUNCE_SEC: "0" }
   );
-  assert.match(zeroDebounceOut.injectSteps[0].systemMessage.systemMessage, /1\. 零秒消抖即时测试$/);
+  assert.match(zeroDebounceOut.injectSteps[0].systemMessage.systemMessage, /1\. 零秒消抖即时测试 /);
 });
 
 test("Stop 收尾兜底、避免续跑重复注入与防死循环上限", (t) => {
@@ -213,37 +234,16 @@ test("Stop 收尾兜底、避免续跑重复注入与防死循环上限", (t) =>
 
   // 1. 非正常结束或后台未空闲时直接放行
   assert.deepEqual(
-    runHook({
-      hookEventName: "Stop",
-      conversationId: "stop-1",
-      cwd: ws,
-      terminationReason: "USER_CANCELED",
-      fullyIdle: true,
-      continuationActive: false,
-    }),
+    runStop(ws, "stop-1", { terminationReason: "USER_CANCELED" }),
     { decision: "allow" }
   );
   assert.deepEqual(
-    runHook({
-      hookEventName: "Stop",
-      conversationId: "stop-1",
-      cwd: ws,
-      terminationReason: "NO_TOOL_CALL",
-      fullyIdle: false,
-      continuationActive: false,
-    }),
+    runStop(ws, "stop-1", { fullyIdle: false }),
     { decision: "allow" }
   );
 
   // 2. 正常结束且未投递时触发 Stop 兜底续跑
-  const stopOut1 = runHook({
-    hookEventName: "Stop",
-    conversationId: "stop-1",
-    cwd: ws,
-    terminationReason: "NO_TOOL_CALL",
-    fullyIdle: true,
-    continuationActive: false,
-  });
+  const stopOut1 = runStop(ws, "stop-1");
   assert.equal(stopOut1.decision, "continue");
   assert.match(stopOut1.reason, /\[FONS 收尾核对\][\s\S]*1\. 未满消抖即结束的任务补充/);
 
@@ -256,39 +256,18 @@ test("Stop 收尾兜底、避免续跑重复注入与防死循环上限", (t) =>
 
   // 4. continuationActive=true 且条目未变时防死循环放行
   assert.deepEqual(
-    runHook({
-      hookEventName: "Stop",
-      conversationId: "stop-1",
-      cwd: ws,
-      terminationReason: "NO_TOOL_CALL",
-      fullyIdle: true,
-      continuationActive: true,
-    }),
+    runStop(ws, "stop-1", { continuationActive: true }),
     { decision: "allow" }
   );
 
   // 5. 同一轮内条目持续变化也最多续跑 2 次
   writeIdeas(ws, "- [ ] 未满消抖即结束的任务补充\n- [ ] 续跑时新加第二条", 0);
-  const stopOut2 = runHook({
-    hookEventName: "Stop",
-    conversationId: "stop-1",
-    cwd: ws,
-    terminationReason: "NO_TOOL_CALL",
-    fullyIdle: true,
-    continuationActive: true,
-  });
+  const stopOut2 = runStop(ws, "stop-1", { continuationActive: true });
   assert.equal(stopOut2.decision, "continue");
 
   writeIdeas(ws, "- [ ] 未满消抖即结束的任务补充\n- [ ] 续跑时新加第二条\n- [ ] 第三条", 0);
   assert.deepEqual(
-    runHook({
-      hookEventName: "Stop",
-      conversationId: "stop-1",
-      cwd: ws,
-      terminationReason: "NO_TOOL_CALL",
-      fullyIdle: true,
-      continuationActive: true,
-    }),
+    runStop(ws, "stop-1", { continuationActive: true }),
     { decision: "allow" }
   );
 });
@@ -321,7 +300,7 @@ test("CLI (fons) 追加、查看、子目录寻根与归档闭环", (t) => {
   const listRes = runCli(["list"], { cwd: subDir });
   assert.equal(listRes.status, 0);
   assert.equal(
-    listRes.stdout.trim(),
+    listRes.stdout.trim().replace(/ \[\d+-[a-f0-9]{64}\]$/gm, ""),
     ["1. 已有无尾换行条目", "2. 补充中文测试条目A", "3. 补充中文测试条目B"].join("\n")
   );
 
@@ -351,4 +330,121 @@ test("CLI (fons) 追加、查看、子目录寻根与归档闭环", (t) => {
     fs.readFileSync(archivePath, "utf8"),
     "- [x] 已有无尾换行条目\n- [X] 补充中文测试条目A\n- [x] 补充中文测试条目B\n"
   );
+});
+
+function writeTranscript(dir, filename, steps) {
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, filename);
+  const lines = steps.map((s) => (typeof s === "string" ? s : JSON.stringify(s)));
+  fs.writeFileSync(filePath, lines.join("\n") + "\n", "utf8");
+  return filePath;
+}
+
+
+function deliver(cwd, conversationId) {
+  return runHook({ hookEventName: "PreInvocation", cwd, conversationId })
+    .injectSteps[0].systemMessage.systemMessage;
+}
+
+function ackToken(message, index = 0) {
+  const match = [...message.matchAll(/\[FONS:([a-f0-9]{16})\]/g)][index];
+  assert.ok(match, "delivery includes an acknowledgment token");
+  return match[1];
+}
+
+function answer(content, stepIndex = 1) {
+  return { step_index: stepIndex, type: "PLANNER_RESPONSE", source: "MODEL", status: "DONE", content };
+}
+
+const userStep = { step_index: 0, type: "USER_INPUT", content: "评审代码" };
+
+test("Stop 不接受文件名、批量命令或写入回合工具名作为确认", (t) => {
+  const ws = makeTempDir(t);
+  writeIdeas(ws, "- [ ] 补充测试\n[ ] 解释架构", 70);
+  deliver(ws, "mentions");
+
+  const transcriptPath = writeTranscript(ws, "transcript.jsonl", [
+    userStep,
+    { ...answer(""), tool_calls: [{ name: "run_command" }] },
+    answer("插件会读取 ideas.md。可以用 fons done。", 2),
+  ]);
+  const stop = runStop(ws, "mentions", { transcriptPath });
+  assert.equal(stop.decision, "continue");
+  assert.match(stop.reason, /补充测试/);
+  assert.match(stop.reason, /解释架构/);
+});
+
+test("Stop 仅结清回复中确认的条目，并补投新条目", (t) => {
+  const ws = makeTempDir(t);
+  writeIdeas(ws, "【√】 已完成\n- [√] 旧完成项\n[ ] 第一个补充", 70);
+  const first = ackToken(deliver(ws, "partial"));
+  writeIdeas(ws, "[ ] 第一个补充\n- [ ] 新追加的补充", 5);
+
+  const log = "transcript.jsonl";
+  const transcriptPath = writeTranscript(ws, log, [userStep, answer("已回答第一项。\n[FONS_ACK: " + first + "]")]);
+  const stop = runStop(ws, "partial", { transcriptPath });
+  assert.equal(stop.decision, "continue");
+  assert.match(stop.reason, /新追加的补充/);
+  assert.doesNotMatch(stop.reason, /第一个补充/);
+
+  const second = ackToken(stop.reason);
+  assert.notEqual(first, second);
+  writeTranscript(ws, log, [userStep, answer("已回答第二项。\n[FONS_ACK: " + second + "]", 2)]);
+  assert.deepEqual(runStop(ws, "partial", { transcriptPath, continuationActive: true }), { decision: "allow" });
+
+  writeTranscript(ws, log, [userStep, { ...userStep, step_index: 3 }, answer("新的一轮。", 4)]);
+  assert.deepEqual(runStop(ws, "partial", { transcriptPath }), { decision: "allow" });
+});
+
+test("Stop 拒绝跨轮确认和旧启发式账本，并检查完整日志的最后一条答复", (t) => {
+  const ws = makeTempDir(t);
+  writeIdeas(ws, "- [ ] 解释模块职责", 70);
+  const delivered = ackToken(deliver(ws, "truncated"));
+  const state = path.join(ws, ".agents", "fons", ".state.json");
+  const records = JSON.parse(fs.readFileSync(state, "utf8"));
+  const conversation = records.truncated;
+  conversation.settledReadOnly = Object.fromEntries(Object.keys(conversation.delivered).map((id) => [id, true]));
+  fs.writeFileSync(state, JSON.stringify(records));
+  const oldAck = answer("旧回复。\n[FONS_ACK: " + delivered + "]");
+  const nextUser = { ...userStep, step_index: 2 };
+  const current = { ...answer("当前回复开头。", 3), truncated_fields: ["content"] };
+  const transcriptPath = writeTranscript(ws, "transcript.jsonl", [
+    userStep, oldAck, "{corrupted-half-json", nextUser, current,
+  ]);
+  const fullLog = "transcript_full.jsonl";
+  writeTranscript(ws, fullLog, [
+    userStep, oldAck, nextUser, answer("未给出回应。", 3),
+    { step_index: 3, type: "GENERIC", content: oldAck.content },
+  ]);
+  const stop = runStop(ws, "truncated", { transcriptPath });
+  assert.equal(stop.decision, "continue");
+
+  const retry = ackToken(stop.reason);
+  assert.notEqual(retry, delivered);
+  const full = answer("回答了模块职责。\n[FONS_ACK: " + retry + "]", 3);
+  writeTranscript(ws, fullLog, [userStep, oldAck, nextUser, full]);
+  assert.deepEqual(runStop(ws, "truncated", { transcriptPath, continuationActive: true }), { decision: "allow" });
+});
+
+test("已完成的同文灵感重新加入时投递一次，归档不改变它的投递状态", (t) => {
+  const ws = makeTempDir(t);
+  const text = "检查文档";
+  const pending = "- [ ] " + text;
+  const done = "【√】 " + text;
+  const pre = { hookEventName: "PreInvocation", cwd: ws, conversationId: "repeat" };
+
+  writeIdeas(ws, pending, 70);
+  assert.match(deliver(ws, "repeat"), /检查文档/);
+  writeIdeas(ws, done + "\n" + pending, 70);
+  assert.match(deliver(ws, "repeat"), /检查文档/);
+
+  const archive = runCli(["archive"], { cwd: ws });
+  assert.equal(archive.status, 0, archive.stderr);
+  assert.deepEqual(runHook(pre, { FONS_DEBOUNCE_SEC: "0" }), {});
+
+  writeIdeas(ws, done, 70);
+  const secondArchive = runCli(["archive"], { cwd: ws });
+  assert.equal(secondArchive.status, 0, secondArchive.stderr);
+  writeIdeas(ws, pending, 70);
+  assert.match(deliver(ws, "repeat"), /检查文档/);
 });
