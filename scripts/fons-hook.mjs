@@ -3,19 +3,12 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
-  computeDebounce, findAppData, isValidSessionId, migrateLegacyInbox,
-  readJson, readPoolData, registerConversation, sessionPaths, writeJsonAtomic,
+  completeAcknowledgedIdeas, computeDebounce, findAppData, isValidSessionId, migrateLegacyInbox,
+  readJson, readPoolData, registerConversation, sessionPaths, withPoolWrite, writeJsonAtomic,
 } from "./fons-store.mjs";
 
 const MAX_STOP_CONTINUES = 2;
-const ACK_LINE = /(?:^|\r?\n)\[FONS_ACK:[ \t]*([a-f0-9]{16}(?:,[ \t]*[a-f0-9]{16})*)\][ \t]*$/;
-function handlingInstructions(ideasPath) {
-  return `有写权限时，处理后用 edit_file 仅将本会话收件箱 ${ideasPath} 对应行的前缀改为 "【√】 "，禁止用 write_file 整文件覆盖。` +
-  '若处于只读 Plan 模式且任务无需写文件，请勿为勾选调用 exit_plan_mode。直接回答补充项，' +
-  '并在回复最后一行用 [FONS_ACK: 编号] 确认已回答的条目。' +
-  '使用各条目 [FONS:编号] 内的真实编号，多条以英文逗号分隔。' +
-  '仅确认实际回答的条目，不要建议批量勾选。';
-}
+const ACK_LINE = /(?:^|\r?\n)\[FONS_ACK:[ \t]*([a-f0-9]{8}(?:,[ \t]*[a-f0-9]{8})*)\][ \t]*$/;
 
 function tryParseJson(line) {
   try {
@@ -79,7 +72,7 @@ function readTurnAcknowledgments(transcriptPath) {
 function markDelivered(items, { state, ui }) {
   state.delivered ??= {};
   return items.map(({ id, text }, index) => {
-    const ackToken = crypto.randomBytes(8).toString("hex");
+    const ackToken = crypto.randomBytes(4).toString("hex");
     const withdrawn = ui.retracted?.[id];
     const deliveredAt = Math.max(Date.now(), (ui.reopened?.[id] ?? 0) + 1, (withdrawn?.ts ?? 0) + 1);
     state.delivered[id] = { text, deliveredAt, ackToken };
@@ -121,14 +114,13 @@ function syncPendingLedger(state, pendingAt, deliveredIds) {
 
 function handlePreInvocation(data) {
   const { ready, pendingAt } = computeDebounce(data);
-  const { state, paths } = data;
+  const { state } = data;
   const deliveredIds = new Set();
   const messages = [];
   if (ready.length) {
     const numbered = markDelivered(ready, data);
     for (const item of ready) deliveredIds.add(item.id);
-    messages.push("[FONS] 以下是用户的非紧急补充。请先完成当前编辑和验证，再统一处理。\n" +
-      handlingInstructions(paths.ideas) + "\n" + numbered);
+    messages.push("[FONS]\n" + numbered);
   }
   syncPendingLedger(state, pendingAt, deliveredIds);
   const retracted = collectRetractions(data);
@@ -137,35 +129,31 @@ function handlePreInvocation(data) {
   return { injectSteps: [{ systemMessage: { systemMessage: messages.join("\n\n") } }] };
 }
 
-function stillUnconfirmed(items, data, transcriptPath) {
-  const tokens = readTurnAcknowledgments(transcriptPath);
-  const remaining = [];
-  for (const item of items) {
-    const delivery = data.state.delivered?.[item.id];
-    const reopened = data.ui.reopened?.[item.id] ?? -1;
-    if (item.status !== "delivered" || !tokens.has(delivery?.ackToken) || delivery.deliveredAt <= reopened) {
-      remaining.push(item);
-      continue;
+function settleAcknowledged(items, data, tokens) {
+  const { state } = data;
+  const confirmed = items.filter(({ id, status }) => status === "delivered" && tokens.has(state.delivered[id].ackToken));
+  if (!confirmed.length) return items;
+
+  const ids = new Set(confirmed.map(({ id }) => id));
+  if (!completeAcknowledgedIdeas(data, ids)) {
+    state.acknowledged ??= {};
+    for (const id of ids) {
+      state.acknowledged[id] = { at: state.delivered[id].deliveredAt };
     }
-    data.state.acknowledged ??= {};
-    data.state.acknowledged[item.id] = { at: Math.max(Date.now(), reopened + 1) };
   }
-  return remaining;
+  for (const id of ids) delete state.delivered[id];
+  return items.filter(({ id }) => !ids.has(id));
 }
 
-function handleStop(input, data) {
+function handleStop(input, data, tokens) {
   const { state, ui, items } = data;
   const timing = computeDebounce(data);
   const open = items.filter((item) => {
     if (item.status === "done") return false;
     return !(item.status === "buffering" && timing.byId.get(item.id)?.editingHold);
   });
-  if (!open.length) {
-    syncPendingLedger(state, timing.pendingAt, new Set());
-    return { decision: "allow" };
-  }
   const distinct = new Map(open.map((item) => [item.id, item]));
-  const remaining = stillUnconfirmed(distinct.values(), data, input.transcriptPath);
+  const remaining = settleAcknowledged([...distinct.values()], data, tokens);
   if (!remaining.length) {
     syncPendingLedger(state, timing.pendingAt, new Set());
     return { decision: "allow" };
@@ -185,8 +173,7 @@ function handleStop(input, data) {
   state.stopCount = count + 1;
   const numbered = markDelivered(remaining, data);
   syncPendingLedger(state, timing.pendingAt, new Set(remaining.map((item) => item.id)));
-  const reminder = "[FONS 收尾核对] 以下补充条目仍需回应或标记完成。\n" +
-    handlingInstructions(data.paths.ideas) + "\n" + numbered;
+  const reminder = "[FONS 收尾核对] 以下补充待处理（完成后在回复末行附 [FONS_ACK: 编号]）：\n" + numbered;
   const reason = [collectRetractions(data), reminder].filter(Boolean).join("\n\n");
   return { decision: "continue", reason };
 }
@@ -206,12 +193,15 @@ function handleSessionEvent(input, context, fallback) {
   const retraction = event === "PreInvocation" && fs.existsSync(paths.retractMarker);
   if (!inbox?.size && !retraction) return fallback;
 
-  const data = readPoolData(context);
-  const before = JSON.stringify(data.state);
-  const result = event === "Stop" ? handleStop(input, data) : handlePreInvocation(data);
-  if (JSON.stringify(data.state) !== before) writeJsonAtomic(paths.state, data.state);
-  if (retraction || result.decision === "continue") clearRetractionMarker(data);
-  return result;
+  const tokens = event === "Stop" ? readTurnAcknowledgments(input.transcriptPath) : null;
+  return withPoolWrite(context, () => {
+    const data = readPoolData(context);
+    const before = JSON.stringify(data.state);
+    const result = event === "Stop" ? handleStop(input, data, tokens) : handlePreInvocation(data);
+    if (JSON.stringify(data.state) !== before) writeJsonAtomic(paths.state, data.state);
+    if (retraction || result.decision === "continue") clearRetractionMarker(data);
+    return result;
+  });
 }
 
 function evaluateHook(input) {

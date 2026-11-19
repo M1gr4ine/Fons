@@ -94,6 +94,10 @@ export function deliveryId(text, count) {
   return hash('sha1', idInput).slice(0, 12);
 }
 
+export function deliveryIdAfterRemovingCompletion(text, rows, archive) {
+  return deliveryId(text, countCompletions(rows, archive).get(text) - 1);
+}
+
 export function parseActiveItems(content, archivedContent = '') {
   const { rows, activeItems } = parseInbox(content);
   if (activeItems.length === 0) return [];

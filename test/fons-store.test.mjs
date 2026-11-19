@@ -137,12 +137,13 @@ test('reopening a receipt completion returns it to buffering', (t) => {
   assert.doesNotMatch(fs.readFileSync(paths(ctx).ideas, 'utf8'), /fons-ack:/);
 });
 
-test('readonly acknowledgments support legacy true and reopening without rewriting ideas', (t) => {
+test('readonly acknowledgments support reopening and deletion without reusing old completion', (t) => {
   const ctx = fixture(t);
-  store.addIdeas({ ...ctx, texts: ['legacy', 'recent'] });
+  store.addIdeas({ ...ctx, texts: ['legacy', 'recent', 'repeat'] });
   const legacy = item(ctx, 'legacy');
   const recent = item(ctx, 'recent');
-  state(ctx, { acknowledged: { [legacy.id]: true, [recent.id]: { at: 1234 } } });
+  const repeat = item(ctx, 'repeat');
+  state(ctx, { acknowledged: { [legacy.id]: true, [recent.id]: { at: 1234 }, [repeat.id]: { at: Date.now() } } });
   assert.equal(item(ctx, 'legacy').status, 'done');
   assert.equal(item(ctx, 'recent').doneSource, 'readonly_ack');
   const before = fs.readFileSync(paths(ctx).ideas, 'utf8');
@@ -151,6 +152,11 @@ test('readonly acknowledgments support legacy true and reopening without rewriti
   assert.equal(fs.readFileSync(paths(ctx).ideas, 'utf8'), before);
   assert.notEqual(item(ctx, 'legacy').status, 'done');
   assert.notEqual(item(ctx, 'recent').status, 'done');
+  const completed = item(ctx, 'repeat');
+  assert.equal(completed.doneSource, 'readonly_ack');
+  assert.equal(store.removeIdea(mutation(ctx, completed)).conflict, false);
+  store.addIdeas({ ...ctx, texts: ['repeat'] });
+  assert.equal(item(ctx, 'repeat').status, 'buffering');
 });
 
 test('removing a delivered item records its retraction without changing the hook ledger', (t) => {

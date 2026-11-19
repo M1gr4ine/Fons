@@ -4,8 +4,9 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import * as store from "../scripts/fons-store.mjs";
 import { archiveCompleted } from "../scripts/fons-store.mjs";
 
@@ -55,6 +56,14 @@ function runStop(cwd, conversationId, overrides = {}) {
     fullyIdle: true,
     continuationActive: false,
     ...overrides,
+  });
+}
+
+function runStopPreloaded(cwd, conversationId, transcriptPath, preload) {
+  return spawnSync(process.execPath, ['--require', preload, HOOK_SCRIPT], {
+    input: JSON.stringify({ hookEventName: 'Stop', cwd, conversationId, terminationReason: 'NO_TOOL_CALL', fullyIdle: true, transcriptPath }),
+    encoding: 'utf8',
+    timeout: 8000,
   });
 }
 
@@ -204,14 +213,11 @@ test("PreInvocation 消抖、合并编号、幂等去重与跨会话独立账本
   fs.writeFileSync(path.join(ws, ".agents", "fons", ".state-11111111-1111-4111-8111-111111111104.json"), JSON.stringify(pendingState));
   const firstOut = runHook({ hookEventName: "PreInvocation", conversationId: "11111111-1111-4111-8111-111111111104", cwd: ws });
   const msg = firstOut.injectSteps[0].systemMessage.systemMessage;
-  assert.match(msg, /^\[FONS\]/);
-  assert.match(msg, /【√】/);
-  assert.match(msg, /edit_file/);
-  assert.match(msg, /write_file/);
-  assert.match(msg, /exit_plan_mode/);
+  assert.match(msg, /^\[FONS\]\n/);
+  assert.doesNotMatch(msg, /\[FONS_ACK|非紧急补充|edit_file|write_file|exit_plan_mode|ideas-/);
   assert.match(
     msg,
-    /1\. 导出接口补充 created_at 字段 \[FONS:[a-f0-9]{16}\]\n2\. 增加导出权限校验 \[FONS:[a-f0-9]{16}\]\n3\. 补充错误码文档/
+    /1\. 导出接口补充 created_at 字段 \[FONS:[a-f0-9]{8}\]\n2\. 增加导出权限校验 \[FONS:[a-f0-9]{8}\]\n3\. 补充错误码文档/
   );
 
   // 同会话二次调用不重复注入
@@ -259,7 +265,7 @@ test("Stop 收尾兜底、避免续跑重复注入与防死循环上限", (t) =>
   // 2. 正常结束且未投递时触发 Stop 兜底续跑
   const stopOut1 = runStop(ws, "11111111-1111-4111-8111-111111111107");
   assert.equal(stopOut1.decision, "continue");
-  assert.match(stopOut1.reason, /\[FONS 收尾核对\][\s\S]*1\. 未满消抖即结束的任务补充/);
+  assert.match(stopOut1.reason, /\[FONS 收尾核对\][\s\S]*\[FONS_ACK: 编号\][\s\S]*1\. 未满消抖即结束的任务补充/);
 
   // 3. 续跑期间紧接着的 PreInvocation 不应重复注入 Stop 已兜底的条目
   writeIdeas(ws, "- [ ] 未满消抖即结束的任务补充", 65);
@@ -365,7 +371,7 @@ function deliver(cwd, conversationId) {
 }
 
 function ackToken(message, index = 0) {
-  const match = [...message.matchAll(/\[FONS:([a-f0-9]{16})\]/g)][index];
+  const match = [...message.matchAll(/\[FONS:([a-f0-9]{8})\]/g)][index];
   assert.ok(match, "delivery includes an acknowledgment token");
   return match[1];
 }
@@ -396,7 +402,7 @@ test("Stop 仅结清回复中确认的条目，并补投新条目", (t) => {
   const ws = makeTempDir(t, "11111111-1111-4111-8111-111111111109");
   writeIdeas(ws, "【√】 已完成\n- [√] 旧完成项\n[ ] 第一个补充", 70);
   const first = ackToken(deliver(ws, "11111111-1111-4111-8111-111111111109"));
-  writeIdeas(ws, "[ ] 第一个补充\n- [ ] 新追加的补充", 5);
+  writeIdeas(ws, "[ ] 第一个补充\r\n- [ ] 新追加的补充", 5);
 
   const log = "transcript.jsonl";
   const transcriptPath = writeTranscript(ws, log, [userStep, answer("已回答第一项。\n[FONS_ACK: " + first + "]")]);
@@ -404,11 +410,15 @@ test("Stop 仅结清回复中确认的条目，并补投新条目", (t) => {
   assert.equal(stop.decision, "continue");
   assert.match(stop.reason, /新追加的补充/);
   assert.doesNotMatch(stop.reason, /第一个补充/);
+  assert.doesNotMatch(stop.reason, /edit_file|write_file|exit_plan_mode|ideas-/);
+  const ideasPath = path.join(ws, ".agents", "fons", "ideas-11111111-1111-4111-8111-111111111109.md");
+  assert.equal(fs.readFileSync(ideasPath, "utf8"), "【√】 第一个补充\r\n- [ ] 新追加的补充");
 
   const second = ackToken(stop.reason);
   assert.notEqual(first, second);
   writeTranscript(ws, log, [userStep, answer("已回答第二项。\n[FONS_ACK: " + second + "]", 2)]);
   assert.deepEqual(runStop(ws, "11111111-1111-4111-8111-111111111109", { transcriptPath, continuationActive: true }), { decision: "allow" });
+  assert.equal(fs.readFileSync(ideasPath, "utf8"), "【√】 第一个补充\r\n【√】 新追加的补充");
 
   writeTranscript(ws, log, [userStep, { ...userStep, step_index: 3 }, answer("新的一轮。", 4)]);
   assert.deepEqual(runStop(ws, "11111111-1111-4111-8111-111111111109", { transcriptPath }), { decision: "allow" });
@@ -586,20 +596,153 @@ test('one session never reads an unrelated session ledger or archive', (t) => {
   assert.equal(fs.statSync(foreign.state).isDirectory(), true);
 });
 
-test('a readonly item reopened after an ACK cannot reuse its old token', (t) => {
+test('a readonly inbox falls back to ledger acknowledgment on Stop and reopening rejects the old token', (t) => {
   const ws = makeTempDir(t, HOOK_A);
-  writeIdeas(ws, '- [ ] answer once', 70);
+  const ideasPath = writeIdeas(ws, '- [ ] answer once', 70);
   const firstToken = ackToken(deliver(ws, HOOK_A));
-  const transcriptPath = writeTranscript(ws, 'reopen.jsonl', [userStep, answer(`answered\n[FONS_ACK: ${firstToken}]`)]);
+  fs.chmodSync(ideasPath, 0o444);
+  t.after(() => { if (fs.existsSync(ideasPath)) fs.chmodSync(ideasPath, 0o666); });
+  const transcriptPath = writeTranscript(ws, 'readonly-reopen.jsonl', [userStep, answer(`answered\n[FONS_ACK: ${firstToken}]`)]);
   assert.deepEqual(runStop(ws, HOOK_A, { transcriptPath }), { decision: 'allow' });
+  assert.equal(fs.readFileSync(ideasPath, 'utf8'), '- [ ] answer once');
   const ctx = { rootDir: ws, sessionId: HOOK_A };
   const row = store.readPoolSnapshot(ctx).items[0];
+  assert.equal(row.status, 'done');
   assert.equal(row.doneSource, 'readonly_ack');
   store.reopenIdea({ ...ctx, rowIndex: row.rowIndex, expectedRaw: row.raw });
   const retry = runStop(ws, HOOK_A, { transcriptPath });
   assert.equal(retry.decision, 'continue');
   assert.notEqual(ackToken(retry.reason), firstToken);
   assert.match(retry.reason, /answer once/);
+});
+
+test('Stop rejects an ACK when the item is withdrawn and re-added after transcript reading', (t) => {
+  const ws = makeTempDir(t, HOOK_A);
+  const ctx = { rootDir: ws, sessionId: HOOK_A };
+  const text = 'withdraw before ACK';
+  writeIdeas(ws, `- [ ] ${text}\n`, 70);
+  const token = ackToken(deliver(ws, HOOK_A));
+  const transcriptPath = writeTranscript(ws, 'racing-ack.jsonl', [userStep, answer(`old\n[FONS_ACK: ${token}]`)]);
+  const storeUrl = new URL('../scripts/fons-store.mjs', import.meta.url).href;
+  const mutation = `
+    import * as store from ${JSON.stringify(storeUrl)};
+    const ctx = ${JSON.stringify(ctx)};
+    const item = store.readPoolSnapshot(ctx).items[0];
+    store.removeIdea({ ...ctx, rowIndex: item.rowIndex, expectedRaw: item.raw });
+    store.addIdeas({ ...ctx, texts: [${JSON.stringify(text)}] });
+  `;
+  const preload = path.join(ws, 'withdraw-before-transcript.cjs');
+  fs.writeFileSync(preload, `
+    const fs = require('node:fs');
+    const { spawnSync } = require('node:child_process');
+    const read = fs.readFileSync;
+    let injected = false;
+    fs.readFileSync = function(file, ...args) {
+      if (!injected && file === ${JSON.stringify(transcriptPath)}) {
+        injected = true;
+        const transcript = read.call(this, file, ...args);
+        const result = spawnSync(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(mutation)}], { encoding: 'utf8' });
+        if (result.status !== 0) throw new Error(result.stderr);
+        return transcript;
+      }
+      return read.call(this, file, ...args);
+    };
+  `);
+  const result = runStopPreloaded(ws, HOOK_A, transcriptPath, preload);
+  assert.equal(result.status, 0, result.stderr);
+  const stop = JSON.parse(result.stdout);
+  assert.equal(stop.decision, 'continue');
+  assert.match(stop.reason, /withdraw before ACK/);
+  assert.notEqual(ackToken(stop.reason), token);
+  assert.equal(itemFor(ctx, text).status, 'delivered');
+  assert.match(fs.readFileSync(store.sessionPaths(ctx).ideas, 'utf8'), /- \[ \] withdraw before ACK/);
+});
+
+test('reopening an inline completion after a failed state write rejects the old ACK', (t) => {
+  const ws = makeTempDir(t, HOOK_A);
+  const ctx = { rootDir: ws, sessionId: HOOK_A };
+  const ideasPath = writeIdeas(ws, '- [ ] retry after failure\n', 70);
+  const token = ackToken(deliver(ws, HOOK_A));
+  const transcriptPath = writeTranscript(ws, 'failed-state.jsonl', [userStep, answer(`done\n[FONS_ACK: ${token}]`)]);
+  const statePath = store.sessionPaths(ctx).state;
+  const preload = path.join(ws, 'deny-state-rename.cjs');
+  fs.writeFileSync(preload, `
+    const fs = require('node:fs');
+    const rename = fs.renameSync;
+    fs.renameSync = function(from, to) {
+      if (to === ${JSON.stringify(statePath)}) throw Object.assign(new Error('state denied'), { code: 'EACCES' });
+      return rename.call(this, from, to);
+    };
+  `);
+  const result = runStopPreloaded(ws, HOOK_A, transcriptPath, preload);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /state denied/);
+  assert.equal(fs.readFileSync(ideasPath, 'utf8'), '【√】 retry after failure\n');
+  const row = itemFor(ctx, 'retry after failure');
+  assert.equal(store.reopenIdea({ ...ctx, rowIndex: row.rowIndex, expectedRaw: row.raw }).conflict, false);
+  const retry = runStop(ws, HOOK_A, { transcriptPath });
+  assert.equal(retry.decision, 'continue');
+  assert.match(retry.reason, /retry after failure/);
+  assert.notEqual(ackToken(retry.reason), token);
+  assert.equal(fs.readFileSync(ideasPath, 'utf8'), '- [ ] retry after failure\n');
+});
+
+test('Stop preserves a concurrent store append while writing inline completion', { timeout: 15000 }, async (t) => {
+  const ws = makeTempDir(t, HOOK_A);
+  const ctx = { rootDir: ws, sessionId: HOOK_A };
+  const ideasPath = writeIdeas(ws, '- [ ] original\n', 70);
+  const token = ackToken(deliver(ws, HOOK_A));
+  const transcriptPath = writeTranscript(ws, 'append-race.jsonl', [userStep, answer(`done\n[FONS_ACK: ${token}]`)]);
+  const ready = path.join(ws, 'write-started');
+  const attempted = path.join(ws, 'append-attempted');
+  const appended = path.join(ws, 'append-finished');
+  const preload = path.join(ws, 'pause-inbox-write.cjs');
+  fs.writeFileSync(preload, `
+    const fs = require('node:fs');
+    const write = fs.writeFileSync;
+    const rename = fs.renameSync;
+    const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    let paused = false;
+    function beforeWrite() {
+      if (paused) return;
+      paused = true;
+      write(${JSON.stringify(ready)}, 'ready');
+      const deadline = Date.now() + 5000;
+      while (!fs.existsSync(${JSON.stringify(attempted)}) && Date.now() < deadline) pause(10);
+      if (!fs.existsSync(${JSON.stringify(attempted)})) throw new Error('append was not attempted');
+      const windowEnd = Date.now() + 450;
+      while (!fs.existsSync(${JSON.stringify(appended)}) && Date.now() < windowEnd) pause(10);
+    }
+    fs.writeFileSync = function(file, ...args) {
+      if (file === ${JSON.stringify(ideasPath)}) beforeWrite();
+      return write.call(this, file, ...args);
+    };
+    fs.renameSync = function(from, to) {
+      if (to === ${JSON.stringify(ideasPath)}) beforeWrite();
+      return rename.call(this, from, to);
+    };
+  `);
+  const storeUrl = new URL('../scripts/fons-store.mjs', import.meta.url).href;
+  const appendScript = `
+    import fs from 'node:fs';
+    import { addIdeas } from ${JSON.stringify(storeUrl)};
+    const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    const deadline = Date.now() + 5000;
+    while (!fs.existsSync(${JSON.stringify(ready)}) && Date.now() < deadline) pause(10);
+    if (!fs.existsSync(${JSON.stringify(ready)})) throw new Error('Stop did not start inbox write');
+    fs.writeFileSync(${JSON.stringify(attempted)}, 'attempted');
+    addIdeas({ ...${JSON.stringify(ctx)}, texts: ['concurrent addition'] });
+    fs.writeFileSync(${JSON.stringify(appended)}, 'done');
+  `;
+  const append = promisify(execFile)(process.execPath, ['--input-type=module', '-e', appendScript], { timeout: 8000 })
+    .then(() => null, (error) => error);
+  const hook = runStopPreloaded(ws, HOOK_A, transcriptPath, preload);
+  const appendError = await append;
+  assert.equal(hook.status, 0, hook.stderr);
+  assert.ifError(appendError);
+  assert.equal(fs.existsSync(ready), true, 'Stop reached the inbox write');
+  assert.equal(JSON.parse(hook.stdout).decision, 'allow');
+  assert.equal(fs.readFileSync(ideasPath, 'utf8'), '【√】 original\n- [ ] concurrent addition\n');
 });
 
 test('delivered and completed items reject text edits while editing a buffering item delivers revised text once', (t) => {
@@ -743,7 +886,7 @@ test('a concurrent hold on another item does not lose Hook delivery or UI state'
   const ctx = { rootDir: ws, sessionId: HOOK_A };
   writeIdeas(ws, '- [ ] parallel\n- [ ] editingLater', 70);
   const laterId = store.readPoolSnapshot(ctx).items.find((row) => row.text === 'editingLater').id;
-  const proc = spawn(process.execPath, [HOOK_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, FONS_DEBOUNCE_SEC: '0' } });
+  const proc = spawn(process.execPath, [HOOK_SCRIPT], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, FONS_DEBOUNCE_SEC: '45' } });
   let output = '';
   let stderr = '';
   proc.stdout.on('data', (part) => { output += part; });
@@ -753,9 +896,15 @@ test('a concurrent hold on another item does not lose Hook delivery or UI state'
     proc.once('close', (code) => resolve(code));
   });
   const storeUrl = new URL('../scripts/fons-store.mjs', import.meta.url).href;
-  const uiScript = `import { holdEditing } from ${JSON.stringify(storeUrl)}; holdEditing({ rootDir: process.argv[1], sessionId: process.argv[2], id: process.argv[3] });`;
-  const ui = spawn(process.execPath, ['--input-type=module', '-e', uiScript, ws, HOOK_A, laterId], { stdio: ['ignore', 'ignore', 'pipe'] });
+  const uiScript = `
+    import { holdEditing } from ${JSON.stringify(storeUrl)};
+    const [rootDir, sessionId, id] = process.argv.slice(1);
+    console.log(JSON.stringify(holdEditing({ rootDir, sessionId, id })));
+  `;
+  const ui = spawn(process.execPath, ['--input-type=module', '-e', uiScript, ws, HOOK_A, laterId], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let uiOutput = '';
   let uiError = '';
+  ui.stdout.on('data', (part) => { uiOutput += part; });
   ui.stderr.on('data', (part) => { uiError += part; });
   const uiDone = new Promise((resolve, reject) => {
     ui.once('error', reject);
@@ -765,10 +914,18 @@ test('a concurrent hold on another item does not lose Hook delivery or UI state'
   const [hookCode, uiCode] = await Promise.all([done, uiDone]);
   assert.equal(hookCode, 0, stderr);
   assert.equal(uiCode, 0, uiError);
-  assert.match(JSON.parse(output).injectSteps[0].systemMessage.systemMessage, /parallel/);
-  const files = store.sessionPaths(ctx);
-  assert.ok(Object.keys(JSON.parse(fs.readFileSync(files.state, 'utf8')).delivered).length);
-  assert.equal(fs.existsSync(files.ui), true);
+  const message = JSON.parse(output).injectSteps[0].systemMessage.systemMessage;
+  assert.match(message, /parallel/);
+  assert.equal(itemFor(ctx, 'parallel').status, 'delivered');
+  const later = itemFor(ctx, 'editingLater');
+  if (JSON.parse(uiOutput).editingHold) {
+    assert.doesNotMatch(message, /editingLater/);
+    assert.equal(later.editingHold, true);
+    assert.equal(later.status, 'buffering');
+  } else {
+    assert.match(message, /editingLater/);
+    assert.equal(later.status, 'delivered');
+  }
 });
 
 function itemFor(ctx, text) {

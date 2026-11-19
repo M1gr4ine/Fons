@@ -1,9 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { COMPLETED_PREFIX, isCompletedLine, parseInbox, parseActiveItems, completedText, deliveryId } from './fons-inbox.mjs';
+import {
+  COMPLETED_PREFIX, isCompletedLine, parseInbox, parseActiveItems, completedText,
+  deliveryId, deliveryIdAfterRemovingCompletion,
+} from './fons-inbox.mjs';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const lockWait = new Int32Array(new SharedArrayBuffer(4));
 
 export function isValidSessionId(sessionId) {
   return typeof sessionId === 'string' && UUID.test(sessionId);
@@ -20,6 +24,66 @@ export function sessionPaths({ rootDir, sessionId }) {
     archive: path.join(fonsDir, 'archive', `${sessionId}.md`),
     retractMarker: path.join(fonsDir, `.retract-${sessionId}.pending`),
   };
+}
+
+function releaseInboxLock(lock, owner) {
+  try {
+    if (owner) fs.rmdirSync(path.join(lock, owner));
+    fs.rmdirSync(lock);
+  } catch (error) {
+    // A competing process can publish a new, nonempty lock before the final rmdir.
+    if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error;
+  }
+}
+
+function reclaimInboxLock(lock) {
+  let entries;
+  try { entries = fs.readdirSync(lock); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  if (!entries.length) return releaseInboxLock(lock);
+  const [owner] = entries;
+  const pid = Number(/^([0-9]+)-[A-Za-z0-9]+$/.exec(owner)?.[1]);
+  if (entries.length === 1 && processStatus(pid) === 'interrupted') releaseInboxLock(lock, owner);
+}
+
+function claimInboxLock(staged, lock) {
+  const deadline = Date.now() + 1000;
+  while (true) {
+    try { fs.renameSync(staged, lock); return; }
+    catch (error) {
+      // Windows reports EPERM when the destination directory already exists.
+      if (!['ENOTEMPTY', 'EEXIST', 'EPERM'].includes(error.code)) throw error;
+      if (Date.now() >= deadline) {
+        throw new Error('无法取得会话收件箱写入锁：' + lock, { cause: error });
+      }
+    }
+    reclaimInboxLock(lock);
+    Atomics.wait(lockWait, 0, 0, 10);
+  }
+}
+
+export function withPoolWrite(context, write) {
+  const { fonsDir } = sessionPaths(context);
+  const lock = path.join(fonsDir, `.inbox-${context.sessionId}.lock`);
+  fs.mkdirSync(fonsDir, { recursive: true });
+  const staged = fs.mkdtempSync(lock + '-');
+  const owner = `${process.pid}-${staged.slice(lock.length + 1)}`;
+  let held = staged;
+  let ownerCreated = false;
+  try {
+    // Publish the owner together with the directory so readers never see a half-acquired lock.
+    fs.mkdirSync(path.join(staged, owner));
+    ownerCreated = true;
+    claimInboxLock(staged, lock);
+    held = lock;
+    return write();
+  } finally {
+    releaseInboxLock(held, ownerCreated ? owner : undefined);
+  }
+}
+
+function poolWriter(write) {
+  return (context) => withPoolWrite(context, () => write(context));
 }
 
 export function findAppData(startPath, ancestorName) {
@@ -48,9 +112,17 @@ export function readJson(filePath) {
 
 export function writeJsonAtomic(filePath, value) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  writeContentsAtomic(filePath, JSON.stringify(value, null, 2));
+}
+
+function writeContentsAtomic(filePath, content, { mode, expected } = {}) {
   const temporary = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
   try {
-    fs.writeFileSync(temporary, JSON.stringify(value, null, 2), 'utf8');
+    fs.writeFileSync(temporary, content, 'utf8');
+    if (mode !== undefined) fs.chmodSync(temporary, mode);
+    if (expected !== undefined && readContent(filePath) !== expected) {
+      throw new Error('收件箱已变化，未确认本轮灵感：' + filePath);
+    }
     fs.renameSync(temporary, filePath);
   } finally {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
@@ -130,7 +202,7 @@ function itemStatus(row, id, state, ui) {
   const reopenedAt = Math.max(ui.reopened?.[id] ?? -1, withdrawnAt);
   if (typeof at === 'number' && at > reopenedAt) return { status: 'done', doneSource: 'readonly_ack' };
   const delivery = state.delivered?.[id];
-  if (delivery && (delivery.deliveredAt ?? 0) > withdrawnAt) return { status: 'delivered', doneSource: null };
+  if (delivery && (delivery.deliveredAt ?? 0) > reopenedAt) return { status: 'delivered', doneSource: null };
   return { status: 'buffering', doneSource: null };
 }
 
@@ -231,7 +303,13 @@ function nextItemTimer(item, freshSet, data, now) {
   return { since, pausedMs: 0, holdSince: null, holdUntil: 0 };
 }
 
-export function stampPoolTimers({ rootDir, sessionId, freshTexts = [], now = Date.now() }) {
+export function stampPoolTimers(context) {
+  const { ideas, ui } = sessionPaths(context);
+  if (!fs.existsSync(ideas) && !fs.existsSync(ui)) return;
+  stampExistingPoolTimers(context);
+}
+
+const stampExistingPoolTimers = poolWriter(({ rootDir, sessionId, freshTexts = [], now = Date.now() }) => {
   const data = readPoolData({ rootDir, sessionId });
   const buffering = data.items.filter((item) => item.status === 'buffering');
   const previous = JSON.stringify(data.ui.timers ?? null);
@@ -246,7 +324,7 @@ export function stampPoolTimers({ rootDir, sessionId, freshTexts = [], now = Dat
   if (JSON.stringify(data.ui.timers ?? null) !== previous) {
     writeJsonAtomic(data.paths.ui, data.ui);
   }
-}
+});
 
 export function readPoolSnapshot({ rootDir, sessionId, debounceMs = resolveDebounceMs(), now = Date.now() }) {
   const data = readPoolData({ rootDir, sessionId });
@@ -263,16 +341,15 @@ export function readPoolSnapshot({ rootDir, sessionId, debounceMs = resolveDebou
   };
 }
 
-export function addIdeas({ rootDir, sessionId, texts }) {
+export const addIdeas = poolWriter(({ rootDir, sessionId, texts }) => {
   const paths = sessionPaths({ rootDir, sessionId });
   const clean = texts.map((text) => String(text).replace(/[\r\n]+/g, ' ').trim().replace(/^[-*]\s*\[\s*\]\s*/, '').trim()).filter(Boolean);
   if (!clean.length) return { count: 0, texts: [] };
-  fs.mkdirSync(paths.fonsDir, { recursive: true });
   appendLinesWithNewline(paths.ideas, clean.map((text) => `- [ ] ${text}`));
   return { count: clean.length, texts: clean };
-}
+});
 
-export function completeIdea({ rootDir, sessionId, token, tokens = [token] }) {
+export const completeIdea = poolWriter(({ rootDir, sessionId, token, tokens = [token] }) => {
   if (!tokens.length) throw new Error('请先运行 fons list，再指定已处理条目的令牌。');
   if (new Set(tokens).size !== tokens.length) throw new Error('确认令牌重复。');
   const data = readPoolData({ rootDir, sessionId });
@@ -286,6 +363,33 @@ export function completeIdea({ rootDir, sessionId, token, tokens = [token] }) {
   // A concurrent editor can append an unterminated line after the snapshot.
   fs.appendFileSync(data.paths.ideas, eol + receipts.join(eol) + eol, 'utf8');
   return { count: selected.length };
+});
+
+// The caller holds the inbox lock from reading the delivery ledger through publishing it.
+export function completeAcknowledgedIdeas(data, ids) {
+  const file = data.paths.ideas;
+  const replacements = new Map();
+  for (const { id, status, rowIndex, text } of data.items) {
+    if (status !== 'delivered' || !ids.has(id)) continue;
+    const row = data.rows[rowIndex];
+    replacements.set(rowIndex, COMPLETED_PREFIX + text + row.raw.slice(row.body.length));
+  }
+  try {
+    writeContentsAtomic(file, foldedRows(data, replacements), {
+      mode: writableFileMode(file), expected: data.content,
+    });
+  } catch (error) {
+    if (['EACCES', 'EPERM', 'EROFS'].includes(error.code)) return false;
+    throw error;
+  }
+  return true;
+}
+
+function writableFileMode(filePath) {
+  // Replacing a file atomically can succeed on POSIX even when the original is read-only.
+  const fd = fs.openSync(filePath, 'r+');
+  try { return fs.fstatSync(fd).mode & 0o777; }
+  finally { fs.closeSync(fd); }
 }
 
 function checkItem(data, rowIndex, expectedRaw) {
@@ -293,23 +397,26 @@ function checkItem(data, rowIndex, expectedRaw) {
   return data.items.find((item) => item.rowIndex === rowIndex) ?? null;
 }
 
-function foldedRows(data, targetIndex, replacement) {
+function foldedRows(data, replacements) {
   return data.rows.map((row, index) => {
-    if (index === targetIndex) return replacement;
+    if (replacements.has(index)) return replacements.get(index);
     if (row.receipt) return '';
     if (row.completed) return `${COMPLETED_PREFIX}${row.text}${row.raw.slice(row.body.length)}`;
     return row.raw;
   }).join('');
 }
 
-function replaceRow(data, rowIndex, replacement) {
-  const next = foldedRows(data, rowIndex, replacement);
+function replaceIdea(data, item, next) {
   if (readContent(data.paths.ideas) !== data.content) return { conflict: true };
+  if (item.status === 'done') {
+    if (item.doneSource === 'readonly_ack') writableFileMode(data.paths.ideas);
+    invalidateCompletion(data, item);
+  }
   fs.writeFileSync(data.paths.ideas, next, 'utf8');
   return { conflict: false };
 }
 
-export function updateIdeaText({ rootDir, sessionId, rowIndex, expectedRaw, newText }) {
+export const updateIdeaText = poolWriter(({ rootDir, sessionId, rowIndex, expectedRaw, newText }) => {
   const data = readPoolData({ rootDir, sessionId });
   const item = checkItem(data, rowIndex, expectedRaw);
   if (!item) return { conflict: true };
@@ -317,10 +424,11 @@ export function updateIdeaText({ rootDir, sessionId, rowIndex, expectedRaw, newT
   const text = String(newText).replace(/[\r\n]+/g, ' ').trim();
   if (!text) throw new Error('灵感内容不能为空。');
   const eol = data.rows[rowIndex].raw.slice(data.rows[rowIndex].body.length);
-  const result = replaceRow(data, rowIndex, `- [ ] ${text}${eol}`);
+  const next = foldedRows(data, new Map([[rowIndex, `- [ ] ${text}${eol}`]]));
+  const result = replaceIdea(data, item, next);
   if (!result.conflict) return { conflict: false, updatedText: text };
   return result;
-}
+});
 
 function restoreRetraction(data, item, published, previous) {
   const current = readJson(data.paths.ui);
@@ -361,36 +469,47 @@ function publishRetraction(data, item, nextContent) {
   }
 }
 
-export function removeIdea({ rootDir, sessionId, rowIndex, expectedRaw }) {
+export const removeIdea = poolWriter(({ rootDir, sessionId, rowIndex, expectedRaw }) => {
   const data = readPoolData({ rootDir, sessionId });
   const item = checkItem(data, rowIndex, expectedRaw);
   if (!item) return { conflict: true };
-  const nextContent = foldedRows(data, rowIndex, '');
-  const result = replaceRow(data, rowIndex, '');
+  const nextContent = foldedRows(data, new Map([[rowIndex, '']]));
+  const result = replaceIdea(data, item, nextContent);
   if (result.conflict || item.status !== 'delivered') return result;
   publishRetraction(data, item, nextContent);
   return result;
+});
+
+function invalidateCompletion({ paths, state, ui, rows, archive }, item) {
+  // Inline completion can outlive the ledger write, leaving its old delivery behind.
+  const id = item.doneSource === 'readonly_ack' ? item.id : deliveryIdAfterRemovingCompletion(item.text, rows, archive);
+  const delivery = state.delivered?.[id];
+  const at = acknowledgmentTime(state.acknowledged?.[id]);
+  if (!delivery && at === undefined) return;
+  ui.reopened ??= {};
+  ui.reopened[id] = Math.max(Date.now(), ui.reopened[id] ?? 0, delivery?.deliveredAt ?? 0, at ?? 0);
+  writeJsonAtomic(paths.ui, ui);
 }
 
-export function reopenIdea({ rootDir, sessionId, rowIndex, expectedRaw }) {
+export const reopenIdea = poolWriter(({ rootDir, sessionId, rowIndex, expectedRaw }) => {
   const data = readPoolData({ rootDir, sessionId });
   const item = checkItem(data, rowIndex, expectedRaw);
   if (!item) return { conflict: true };
   if (item.status !== 'done') return { conflict: false };
   if (item.doneSource === 'readonly_ack') {
     if (readContent(data.paths.ideas) !== data.content) return { conflict: true };
-    data.ui.reopened ??= {};
-    data.ui.reopened[item.id] = Date.now();
-    writeJsonAtomic(data.paths.ui, data.ui);
+    invalidateCompletion(data, item);
     return { conflict: false };
   }
   const row = data.rows[rowIndex];
-  const result = replaceRow(data, rowIndex, `- [ ] ${item.text}${row.raw.slice(row.body.length)}`);
+  const pending = `- [ ] ${item.text}${row.raw.slice(row.body.length)}`;
+  const next = foldedRows(data, new Map([[rowIndex, pending]]));
+  const result = replaceIdea(data, item, next);
   if (!result.conflict) return { conflict: false, reopenedText: item.text };
   return result;
-}
+});
 
-export function holdEditing({ rootDir, sessionId, id, now = Date.now() }) {
+export const holdEditing = poolWriter(({ rootDir, sessionId, id, now = Date.now() }) => {
   const data = readPoolData({ rootDir, sessionId });
   const target = data.items.find((item) => item.id === id && item.status === 'buffering');
   if (!target) {
@@ -409,9 +528,9 @@ export function holdEditing({ rootDir, sessionId, id, now = Date.now() }) {
   data.ui.timers[id] = { since, pausedMs, holdSince, holdUntil: now + HOLD_LEASE_MS };
   writeJsonAtomic(data.paths.ui, data.ui);
   return { editingHold: true, id, until: data.ui.timers[id].holdUntil };
-}
+});
 
-export function releaseEditing({ rootDir, sessionId, id, now = Date.now() }) {
+export const releaseEditing = poolWriter(({ rootDir, sessionId, id, now = Date.now() }) => {
   const data = readPoolData({ rootDir, sessionId });
   const current = data.ui.timers?.[id];
   if (!current) return { editingHold: false };
@@ -427,7 +546,7 @@ export function releaseEditing({ rootDir, sessionId, id, now = Date.now() }) {
   data.ui.timers[id] = { since, pausedMs: status.pausedMs, holdSince: null, holdUntil: 0 };
   writeJsonAtomic(data.paths.ui, data.ui);
   return { editingHold: false, id };
-}
+});
 
 function archiveRows(rows, doneByIndex = new Map()) {
   const done = [];
@@ -443,7 +562,7 @@ function archiveRows(rows, doneByIndex = new Map()) {
   return { done, kept: kept.join('') };
 }
 
-export function archiveCompleted(context) {
+export const archiveCompleted = poolWriter((context) => {
   const { content, rows, items, paths } = readPoolData(context);
   const acknowledged = new Map(items.filter((row) => row.doneSource === 'readonly_ack').map((row) => [row.rowIndex, row.text]));
   const { done, kept } = archiveRows(rows, acknowledged);
@@ -455,7 +574,7 @@ export function archiveCompleted(context) {
   if (kept.trim()) fs.writeFileSync(paths.ideas, kept, 'utf8');
   else fs.unlinkSync(paths.ideas);
   return { count: done.length };
-}
+});
 
 function migrationOwners(state, id, fallback) {
   const owners = Object.entries(state).filter(([, bucket]) => bucket?.delivered?.[id]).map(([id]) => id);
@@ -651,7 +770,7 @@ function publishMigration(plan, created) {
   }
 }
 
-function migrationProcessStatus(pid) {
+function processStatus(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 0) return 'unknown';
   try { process.kill(pid, 0); return 'active'; }
   catch (error) { return error.code === 'ESRCH' ? 'interrupted' : 'unknown'; }
@@ -663,7 +782,7 @@ export function getMigrationWarning({ rootDir }) {
   let owner;
   try { owner = readJson(path.join(lock, 'owner.json')); }
   catch { return { status: 'unknown', message: '旧数据迁移状态无法确认，请按 README 核对现场。' }; }
-  const status = owner.step === 'rollback-failed' ? 'interrupted' : migrationProcessStatus(owner.pid);
+  const status = owner.step === 'rollback-failed' ? 'interrupted' : processStatus(owner.pid);
   const message = status === 'interrupted' ? '旧数据迁移中断，请按 README 手动恢复。'
     : status === 'active' ? '旧数据正在迁移，请稍候。'
       : '旧数据迁移状态无法确认，请按 README 核对现场。';
