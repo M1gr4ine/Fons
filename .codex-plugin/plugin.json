@@ -1,0 +1,14 @@
+{
+  "name": "fons",
+  "version": "0.3.1",
+  "description": "在 Codex 会话中直接打开灵感池，记录、编辑并投递补充想法。",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Fons · 灵感池",
+    "shortDescription": "打开当前会话的交互式灵感池",
+    "defaultPrompt": ["打开当前会话的 Fons 灵感池"],
+    "composerIcon": "./assets/sidebar-icon.svg",
+    "logo": "./assets/logo.svg"
+  }
+}

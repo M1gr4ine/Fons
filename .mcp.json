@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "fons": {
+      "command": "node",
+      "args": ["./codex/fons-mcp.mjs"],
+      "cwd": ".",
+      "env_vars": ["CODEX_HOME"]
+    }
+  }
+}

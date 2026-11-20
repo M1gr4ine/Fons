@@ -29,7 +29,8 @@ function register(root, sessionId, rootDir, appData = path.join(root, 'host')) {
 
 function run(root, args, nodeArgs = [], overrides = {}) {
   const env = { ...process.env, FONS_ROOT: root, FONS_APP_DATA: path.join(root, 'host'),
-    HOME: path.join(root, 'home'), USERPROFILE: path.join(root, 'home'), FONS_SESSION: '', ...overrides };
+    HOME: path.join(root, 'home'), USERPROFILE: path.join(root, 'home'),
+    CODEX_HOME: undefined, FONS_HOST: '', FONS_SESSION: '', ...overrides };
   return spawnSync(process.execPath, [...nodeArgs, cli, ...args], { cwd: root, encoding: 'utf8', env });
 }
 
@@ -215,54 +216,6 @@ test('a batch of done tokens is all or nothing and preserves CRLF', (t) => {
   assert.doesNotMatch(run(root, ['list']).stdout, /first|second/);
 });
 
-test('legacy inbox without a lock blocks writes and leaves both legacy and session files intact', (t) => {
-  const { root, ideas } = setup(t, '- [ ] current\n');
-  const legacy = path.join(root, '.agents', 'fons', 'ideas.md');
-  const ledger = path.join(root, '.agents', 'fons', '.state.json');
-  fs.writeFileSync(legacy, '- [ ] legacy\n');
-  fs.writeFileSync(ledger, '{"old":{}}');
-  for (const args of [['extra'], ['list'], ['archive'], ['done', '0-invalid']]) {
-    const result = run(root, args);
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /Hook/);
-  }
-  assert.equal(fs.readFileSync(ideas, 'utf8'), '- [ ] current\n');
-  assert.equal(fs.readFileSync(legacy, 'utf8'), '- [ ] legacy\n');
-  assert.equal(fs.readFileSync(ledger, 'utf8'), '{"old":{}}');
-});
-
-test('a residual migration lock warns but permits reading and creating a session inbox', (t) => {
-  const { root, ideas } = setup(t, '- [ ] current\n');
-  const dir = path.join(root, '.agents', 'fons');
-  const lock = path.join(dir, '.migration.lock');
-  fs.mkdirSync(lock);
-  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: 99999999, startedAt: 1, step: 'publishing' }));
-  fs.writeFileSync(path.join(dir, 'ideas.md'), '- [ ] legacy\n');
-  const existing = run(root, ['list']);
-  assert.equal(existing.status, 0, existing.stderr);
-  assert.match(existing.stderr, /旧.*迁移|迁移.*旧/);
-  assert.match(existing.stdout, /current/);
-  fs.rmSync(ideas);
-  const added = run(root, ['new session item']);
-  assert.equal(added.status, 0, added.stderr);
-  assert.match(added.stderr, /旧.*迁移|迁移.*旧/);
-  assert.equal(fs.readFileSync(ideas, 'utf8'), '- [ ] new session item\n');
-  assert.equal(fs.readFileSync(path.join(dir, 'ideas.md'), 'utf8'), '- [ ] legacy\n');
-  assert.equal(fs.existsSync(lock), true);
-});
-
-test('an unindexed workspace with a legacy inbox is told to trigger Hook and leaves data intact', (t) => {
-  const { root, ideas } = setup(t, '- [ ] current\n');
-  const legacy = path.join(root, '.agents', 'fons', 'ideas.md');
-  fs.writeFileSync(legacy, '- [ ] old\n');
-  fs.rmSync(path.join(root, 'host', 'fons', 'conversations', `${A}.json`));
-  const result = run(root, ['new item']);
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Hook/);
-  assert.equal(fs.readFileSync(legacy, 'utf8'), '- [ ] old\n');
-  assert.equal(fs.readFileSync(ideas, 'utf8'), '- [ ] current\n');
-});
-
 test('add output matches the normalized item stored for multiline input', (t) => {
   const { root, ideas } = setup(t, '');
   const result = run(root, ['- [ ] first\nsecond']);
@@ -348,4 +301,178 @@ test('CLI -a / --attach stores attachments, supports pure-attachment items, and 
 
   assert.notEqual(run(root, ['-a', path.join(root, 'missing.png'), 'bad']).status, 0);
   assert.notEqual(run(root, ['-a', imgFile, 'list']).status, 0);
+});
+
+function registerCodex(appData, sessionId, entry) {
+  const index = path.join(appData, 'fons', 'conversations');
+  fs.mkdirSync(index, { recursive: true });
+  fs.writeFileSync(path.join(index, sessionId + '.json'), JSON.stringify({
+    host: 'codex', title: 'Codex 会话', registeredAt: 2, ...entry,
+  }));
+}
+
+test('CLI finds both hosts and requires explicit selection before writing', (t) => {
+  const { root, ideas } = setup(t, '- [ ] AG item\n');
+  const antigravityData = path.join(root, 'home', '.gemini', 'antigravity');
+  const codexData = path.join(root, 'Codex home');
+  const env = { FONS_APP_DATA: undefined, CODEX_HOME: codexData };
+  register(root, A, root, antigravityData);
+  registerCodex(codexData, B, { rootDir: root });
+  const bIdeas = path.join(root, '.agents', 'fons', `ideas-${B}.md`);
+  const ambiguous = run(root, ['new item'], [], env);
+  assert.equal(ambiguous.status, 2, ambiguous.stderr);
+  assert.match(ambiguous.stderr, new RegExp(`\\[antigravity\\]\\s+${A}`));
+  assert.match(ambiguous.stderr, new RegExp(`\\[codex\\]\\s+${B}.*Codex 会话.*1970-01-01`));
+  assert.match(ambiguous.stderr, /--host/);
+  assert.equal(fs.existsSync(bIdeas), false);
+
+  const sessions = run(root, ['sessions'], [], env);
+  assert.equal(sessions.status, 0, sessions.stderr);
+  assert.match(sessions.stdout, new RegExp(B));
+  assert.match(sessions.stdout, new RegExp(A));
+
+  const added = run(root, ['--host=codex', 'from Codex'], [], { ...env, FONS_HOST: 'antigravity' });
+  assert.equal(added.status, 0, added.stderr);
+  assert.equal(fs.readFileSync(bIdeas, 'utf8'), '- [ ] from Codex\n');
+  assert.equal(fs.readFileSync(ideas, 'utf8'), '- [ ] AG item\n');
+
+  const selected = run(root, ['list'], [], { ...env, FONS_HOST: 'codex' });
+  assert.equal(selected.status, 0, selected.stderr);
+  assert.match(selected.stdout, /from Codex/);
+});
+
+test('an explicit ID shared by two host indexes also requires a host', (t) => {
+  const { root } = setup(t, '- [ ] AG item\n');
+  const antigravityData = path.join(root, 'home', '.gemini', 'antigravity');
+  const codexData = path.join(root, 'Codex home');
+  const other = path.join(root, 'another workspace');
+  fs.mkdirSync(other);
+  const env = { FONS_APP_DATA: undefined, CODEX_HOME: codexData };
+  register(root, A, root, antigravityData);
+  registerCodex(codexData, A, { rootDir: other });
+  const ambiguous = run(root, ['list', '-s', A], [], env);
+  assert.equal(ambiguous.status, 2, ambiguous.stderr);
+  assert.match(ambiguous.stderr, /\[codex\]/);
+  assert.match(ambiguous.stderr, /\[antigravity\]/);
+  const added = run(root, ['-s', A, '--host', 'codex', 'from Codex'], [], env);
+  assert.equal(added.status, 0, added.stderr);
+  assert.equal(fs.readFileSync(path.join(other, '.agents', 'fons', `ideas-${A}.md`), 'utf8'), '- [ ] from Codex\n');
+});
+
+test('CODEX_HOME and FONS_APP_DATA resolve isolated no-workspace indexes', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fons-cli-codex-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const codexData = path.join(root, 'custom Codex home');
+  registerCodex(codexData, A, { scope: 'no-workspace', rootDir: null });
+  const defaultEnv = { FONS_APP_DATA: undefined, CODEX_HOME: codexData };
+  const missing = run(root, ['--host', 'codex', 'list'], [], defaultEnv);
+  assert.equal(missing.status, 2, missing.stderr);
+  assert.match(missing.stderr, /Codex/);
+  const added = run(root, ['-n', 'standalone idea'], [], { ...defaultEnv, FONS_SESSION: B });
+  assert.equal(added.status, 0, added.stderr);
+  const inbox = path.join(codexData, 'fons', 'no-workspace', `ideas-${A}.md`);
+  assert.equal(fs.readFileSync(inbox, 'utf8'), '- [ ] standalone idea\n');
+  assert.equal(fs.existsSync(path.join(root, '.agents')), false);
+  const hidden = run(root, ['-n', '--host', 'codex', 'sessions'], [], { CODEX_HOME: codexData });
+  assert.equal(hidden.status, 2, hidden.stderr);
+});
+
+test('Codex workspace selection sees a .codex marker from a child directory', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fons-cli-codex-workspace-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const appData = path.join(root, 'host');
+  registerCodex(appData, A, { rootDir: root });
+  fs.mkdirSync(path.join(root, '.codex'));
+  const subdir = path.join(root, 'child');
+  fs.mkdirSync(subdir);
+  const env = { FONS_ROOT: undefined, FONS_APP_DATA: appData };
+  const added = run(subdir, ['new idea'], [], env);
+  assert.equal(added.status, 0, added.stderr);
+  const listed = run(subdir, ['--host', 'codex', 'list'], [], env);
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /new idea/);
+});
+
+
+test('codex init stages only the Codex plugin and preserves existing hooks and AGENTS', (t) => {
+  const { root } = setup(t, '');
+  const codexHome = path.join(root, 'Codex 测试 home');
+  fs.mkdirSync(codexHome);
+  const hooksPath = path.join(codexHome, 'hooks.json');
+  const agentsPath = path.join(codexHome, 'AGENTS.md');
+  const oldHooks = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"existing-hook"}]}]}}';
+  fs.writeFileSync(hooksPath, oldHooks);
+  fs.writeFileSync(agentsPath, 'Existing user rules\n');
+  const initial = run(root, ['codex', 'init'], [], { CODEX_HOME: codexHome });
+  assert.equal(initial.status, 0, initial.stderr);
+  assert.match(initial.stdout, /codex plugin add fons@fons-local/);
+  const marketplaceRoot = path.join(codexHome, 'fons', 'plugin-marketplace');
+  const marketplacePath = path.join(marketplaceRoot, '.agents', 'plugins', 'marketplace.json');
+  const catalog = JSON.parse(fs.readFileSync(marketplacePath, 'utf8'));
+  const pluginRoot = path.resolve(marketplaceRoot, catalog.plugins[0].source.path);
+  assert.equal(fs.existsSync(path.join(pluginRoot, 'plugin.json')), false);
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(pluginRoot, '.codex-plugin', 'plugin.json'), 'utf8'));
+  const config = JSON.parse(fs.readFileSync(path.join(pluginRoot, manifest.hooks), 'utf8'));
+  assert.deepEqual(Object.keys(config.hooks), ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop']);
+  assert.equal(fs.readFileSync(hooksPath, 'utf8'), oldHooks);
+  assert.equal(fs.readFileSync(agentsPath, 'utf8'), 'Existing user rules\n');
+  assert.equal(run(root, ['codex', 'init'], [], { CODEX_HOME: codexHome }).status, 0);
+  assert.equal(JSON.parse(fs.readFileSync(marketplacePath, 'utf8')).plugins[0].source.path, catalog.plugins[0].source.path);
+});
+
+test('codex init detects direct Fons hooks in the active project and Codex home', (t) => {
+  const { root } = setup(t, '');
+  const codexHome = path.join(root, 'custom Codex home');
+  const projectConfig = path.join(root, '.codex');
+  const directHooks = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node \\"C:/Fons/scripts/fons-hook.mjs\\" --host=codex"}]}]}}';
+  for (const dir of [projectConfig, codexHome]) {
+    fs.mkdirSync(dir, { recursive: true });
+    const filename = path.join(dir, 'hooks.json');
+    fs.writeFileSync(filename, directHooks);
+    const result = run(root, ['codex', 'init'], [], { CODEX_HOME: codexHome });
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(filename), result.stderr);
+    assert.equal(fs.readFileSync(filename, 'utf8'), directHooks);
+    assert.equal(fs.existsSync(path.join(codexHome, 'fons', 'plugin-marketplace')), false);
+    fs.unlinkSync(filename);
+  }
+});
+
+
+test('installed Codex command uses its package root over cwd', (t) => {
+  const { root } = setup(t, '');
+  const codexHome = path.join(root, 'Codex 中文空格 $cache %folder%');
+  const env = { ...process.env, CODEX_HOME: codexHome, FONS_APP_DATA: undefined };
+  const setupResult = run(root, ['codex', 'init'], [], env);
+  assert.equal(setupResult.status, 0, setupResult.stderr);
+  const marketplaceRoot = path.join(codexHome, 'fons', 'plugin-marketplace');
+  const catalog = JSON.parse(fs.readFileSync(path.join(marketplaceRoot, '.agents', 'plugins', 'marketplace.json'), 'utf8'));
+  const pluginRoot = path.resolve(marketplaceRoot, catalog.plugins[0].source.path);
+  const hooksConfig = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'hooks', 'hooks.json'), 'utf8'));
+  const command = hooksConfig.hooks.SessionStart[0].hooks[0].command;
+  const options = { env: { ...env, PLUGIN_ROOT: pluginRoot }, cwd: root, encoding: 'utf8' };
+  const testId = '12345678-1234-7234-8234-123456789aaa';
+  const input = JSON.stringify({
+    hook_event_name: 'SessionStart',
+    session_id: testId,
+    cwd: root,
+    transcript_path: path.join(root, 'rollout.jsonl'),
+    source: 'startup',
+  });
+  const shells = process.platform === 'win32' ? [
+    { executable: 'cmd.exe', args: ['/D', '/S', '/C', '"' + command + '"'], windowsVerbatimArguments: true },
+    { executable: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', command] },
+  ] : [{ executable: 'sh', args: ['-c', command] }];
+
+  const registrationPath = path.join(codexHome, 'fons', 'conversations', testId + '.json');
+  for (const { executable, args, windowsVerbatimArguments } of shells) {
+    const result = spawnSync(executable, args, { ...options, input, windowsVerbatimArguments });
+    assert.equal(result.status, 0, executable + ': ' + result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {});
+    const record = JSON.parse(fs.readFileSync(registrationPath, 'utf8'));
+    assert.equal(record.host, 'codex');
+    assert.equal(record.rootDir, root);
+    fs.unlinkSync(registrationPath);
+  }
 });

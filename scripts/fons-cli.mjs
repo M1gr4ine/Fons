@@ -1,122 +1,80 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { splitIdeaText } from './fons-inbox.mjs';
 import {
-  MAX_ATTACHMENT_BYTES, MAX_ITEM_ATTACHMENTS, addIdeas, archiveCompleted, completeIdea,
-  getMigrationWarning, listConversations, lookupConversation, readPoolSnapshot,
+  MAX_ATTACHMENT_BYTES, MAX_ITEM_ATTACHMENTS, addIdeas, archiveCompleted, completeIdea, readPoolSnapshot,
 } from './fons-store.mjs';
+import { formatSessions, listSessions, resolveSession } from './fons-sessions.mjs';
+import { prepareCodexPlugin } from '../codex/init.mjs';
 
 const USAGE = `用法:
   fons [-s <会话ID> | -n | --no-workspace] [-a <文件路径>...] ["<灵感内容>"]  向本会话收件箱追加待办条目
   fons [-s <会话ID> | -n | --no-workspace] list                             查看待处理条目及其确认令牌
   fons [-s <会话ID> | -n | --no-workspace] done <令牌...>                   仅确认指定条目（【√】）
   fons [-s <会话ID> | -n | --no-workspace] archive                          归档已完成条目
-  fons help                                                                 显示帮助`;
+  fons [-s <会话ID> | -n | --no-workspace] sessions                        列出已登记会话
+  fons codex init                                                           准备 Codex 插件安装
+  fons help                                                                 显示帮助
 
-function findWorkspaceRoot(startDir) {
-  let dir = path.resolve(startDir);
-  while (true) {
-    if (fs.existsSync(path.join(dir, '.agents')) || fs.existsSync(path.join(dir, '.git'))) return dir;
-    const parent = path.dirname(dir);
-    if (parent === dir) return path.resolve(startDir);
-    dir = parent;
+宿主选择：--host codex|antigravity（或 FONS_HOST）`;
+
+const OPTION_KEYS = {
+  '-s': 'sessionId',
+  '--session': 'sessionId',
+  '--host': 'host',
+  '-a': 'attachPaths',
+  '--attach': 'attachPaths',
+};
+
+function optionValue(args, index, flag, inlineValue) {
+  if (inlineValue !== undefined && inlineValue.trim()) return inlineValue.trim();
+  const value = args[index + 1];
+  if (inlineValue !== undefined || !value || value.startsWith('-')) {
+    throw new Error('请为 ' + flag + ' 指定一个值。');
   }
+  return value;
 }
 
 function parseOptions(args) {
-  const positional = [];
-  const attachPaths = [];
-  let sessionId;
-  let noWorkspace = false;
+  const options = { args: [], attachPaths: [] };
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === '-n' || arg === '--no-workspace') {
-      noWorkspace = true;
+      options.scope = 'no-workspace';
       continue;
     }
-    if (arg === '-a' || arg === '--attach') {
-      const target = args[index + 1];
-      if (!target || target.startsWith('-')) {
-        throw new Error('请为 -a 或 --attach 指定一个文件路径。');
-      }
-      attachPaths.push(args[++index]);
+    const separator = arg.indexOf('=');
+    const flag = separator < 0 ? arg : arg.slice(0, separator);
+    const inlineValue = separator < 0 ? undefined : arg.slice(separator + 1);
+    const key = Object.hasOwn(OPTION_KEYS, flag) ? OPTION_KEYS[flag] : null;
+    if (!key) {
+      options.args.push(arg);
       continue;
     }
-    if (arg.startsWith('--attach=')) {
-      const target = arg.slice('--attach='.length).trim();
-      if (!target) throw new Error('请为 -a 或 --attach 指定一个文件路径。');
-      attachPaths.push(target);
-      continue;
-    }
-    if (arg !== '-s' && arg !== '--session') { positional.push(arg); continue; }
-    if (sessionId !== undefined || !args[index + 1] || args[index + 1].startsWith('-')) {
-      throw new Error('请为 -s 或 --session 指定一个会话 ID。');
-    }
-    sessionId = args[++index];
+    const value = optionValue(args, index, flag, inlineValue);
+    if (inlineValue === undefined) index++;
+    applyOption(options, key, value, flag);
   }
-  if (noWorkspace && sessionId !== undefined) {
+  validateOptions(options);
+  return options;
+}
+
+function applyOption(options, key, value, flag) {
+  if (key === 'attachPaths') {
+    options.attachPaths.push(value);
+    return;
+  }
+  if (options[key] !== undefined) throw new Error('不能重复指定 ' + flag + '。');
+  options[key] = value;
+}
+
+function validateOptions(options) {
+  if (options.scope && options.sessionId !== undefined) {
     throw new Error('不能同时指定 -s/--session 和 -n/--no-workspace。');
   }
-  if (attachPaths.length > MAX_ITEM_ATTACHMENTS) {
-    throw new Error(`单条灵感最多添加 ${MAX_ITEM_ATTACHMENTS} 个附件。`);
+  if (options.attachPaths.length > MAX_ITEM_ATTACHMENTS) {
+    throw new Error('单条灵感最多添加 ' + MAX_ITEM_ATTACHMENTS + ' 个附件。');
   }
-  return {
-    args: positional,
-    attachPaths,
-    sessionId: noWorkspace ? undefined : (sessionId ?? process.env.FONS_SESSION?.trim()),
-    noWorkspace,
-  };
-}
-
-function formatRegisteredAt(value) {
-  if (value === undefined || value === null) return '未知时间';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
-}
-
-function candidateError(candidates, heading = '当前工作区有多个会话，请用 -s 指定：\n') {
-  const details = candidates.map(({ sessionId, title, registeredAt }) =>
-    '  ' + sessionId + '  ' + (title || '无标题') + '  ' + formatRegisteredAt(registeredAt)).join('\n');
-  const error = new Error(heading + details);
-  error.exitCode = 2;
-  return error;
-}
-
-function resolveSession({ sessionId, noWorkspace }) {
-  const appData = process.env.FONS_APP_DATA?.trim() || path.join(os.homedir(), '.gemini', 'antigravity');
-  if (sessionId) {
-    const entry = lookupConversation({ appData, sessionId });
-    if (!entry) throw new Error('找不到指定会话，请先在 Antigravity 中开启会话。');
-    return { scope: entry.scope, rootDir: entry.rootDir, fonsDir: entry.fonsDir, sessionId };
-  }
-  if (noWorkspace) {
-    const candidates = listConversations({ appData, scope: 'no-workspace' });
-    if (!candidates.length) {
-      throw new Error('未找到已登记的无工作区会话，请先在 Antigravity 中开启会话并确认全局 Fons 插件已启用。');
-    }
-    if (candidates.length > 1) throw candidateError(candidates, '存在多个无工作区会话，请用 -s 指定：\n');
-    return { scope: candidates[0].scope, rootDir: null, fonsDir: candidates[0].fonsDir, sessionId: candidates[0].sessionId };
-  }
-  const workspace = process.env.FONS_ROOT?.trim() || findWorkspaceRoot(process.cwd());
-  const candidates = listConversations({ appData, rootDir: workspace });
-  if (!candidates.length) {
-    checkMigration({ scope: 'workspace', rootDir: workspace });
-    throw new Error('请先在 Antigravity 中开启会话。');
-  }
-  if (candidates.length > 1) throw candidateError(candidates);
-  return { scope: candidates[0].scope, rootDir: candidates[0].rootDir, fonsDir: candidates[0].fonsDir, sessionId: candidates[0].sessionId };
-}
-
-function checkMigration(context) {
-  if (context.scope === 'no-workspace') return;
-  const fonsDir = path.join(context.rootDir, '.agents', 'fons');
-  const warning = getMigrationWarning(context);
-  if (warning) process.stderr.write('提示：' + warning.message + '\n');
-  if (!fs.existsSync(path.join(fonsDir, 'ideas.md'))) return;
-  const message = '检测到旧收件箱，请先在 Antigravity 中触发 Hook 完成迁移。';
-  if (!warning) throw new Error(message);
-  process.stderr.write('提示：' + message + '\n');
 }
 
 function formatDisplayText(text, sessionId) {
@@ -189,17 +147,41 @@ function run(context, args, attachPaths) {
   return cmdAdd(context, args, attachPaths);
 }
 
-try {
-  const options = parseOptions(process.argv.slice(2));
-  if (!options.args.length && !options.attachPaths.length) throw new Error(USAGE);
-  if (!options.attachPaths.length && options.args.length === 1 && ['help', '--help', '-h'].includes(options.args[0])) {
-    process.stdout.write(USAGE + '\n');
-  } else {
-    const context = resolveSession(options);
-    checkMigration(context);
-    run(context, options.args, options.attachPaths);
+function cmdCodexInit(options) {
+  if (options.attachPaths.length || options.scope || options.sessionId || options.host) {
+    throw new Error('codex init 不接受会话或附件参数。');
   }
-} catch (error) {
+  const { marketplaceRoot, pluginId } = prepareCodexPlugin();
+  process.stdout.write('已准备 Codex 插件。请使用 Codex CLI 注册并安装，再审阅 Fons Hook 的信任请求。\n'
+    + '插件市场目录：' + marketplaceRoot + '\n'
+    + 'codex plugin marketplace add "<上面的插件市场目录>"\n'
+    + 'codex plugin add ' + pluginId + '\n');
+}
+
+function cmdSessions(options) {
+  if (options.attachPaths.length) throw new Error('sessions 不支持 -a/--attach 参数。');
+  process.stdout.write(formatSessions(listSessions(options)) + '\n');
+}
+
+function reportError(error) {
   process.stderr.write('错误：' + error.message + '\n');
   process.exitCode = error.exitCode ?? 1;
+}
+
+function runCli(options) {
+  const { args, attachPaths } = options;
+  if (!args.length && !attachPaths.length) throw new Error(USAGE);
+  if (!attachPaths.length && args.length === 1 && ['help', '--help', '-h'].includes(args[0])) {
+    process.stdout.write(USAGE + '\n');
+    return;
+  }
+  if (args.length === 2 && args[0] === 'codex' && args[1] === 'init') return cmdCodexInit(options);
+  if (args.length === 1 && args[0] === 'sessions') return cmdSessions(options);
+  run(resolveSession(options), args, attachPaths);
+}
+
+try {
+  runCli(parseOptions(process.argv.slice(2)));
+} catch (error) {
+  reportError(error);
 }

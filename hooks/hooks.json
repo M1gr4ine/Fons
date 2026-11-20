@@ -1,0 +1,48 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const path = require('node:path'); const root = process.env.PLUGIN_ROOT || ''; if (path.isAbsolute(root) === false) throw new Error('Missing Codex plugin root'); const hook = path.join(root, 'scripts', 'fons-hook.mjs'); const args = process.argv.splice(1); import(require('node:url').pathToFileURL(hook).href).then((module) => module.runMain(args))\" -- --host=codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const path = require('node:path'); const root = process.env.PLUGIN_ROOT || ''; if (path.isAbsolute(root) === false) throw new Error('Missing Codex plugin root'); const hook = path.join(root, 'scripts', 'fons-hook.mjs'); const args = process.argv.splice(1); import(require('node:url').pathToFileURL(hook).href).then((module) => module.runMain(args))\" -- --host=codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const path = require('node:path'); const root = process.env.PLUGIN_ROOT || ''; if (path.isAbsolute(root) === false) throw new Error('Missing Codex plugin root'); const hook = path.join(root, 'scripts', 'fons-hook.mjs'); const args = process.argv.splice(1); import(require('node:url').pathToFileURL(hook).href).then((module) => module.runMain(args))\" -- --host=codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e \"const path = require('node:path'); const root = process.env.PLUGIN_ROOT || ''; if (path.isAbsolute(root) === false) throw new Error('Missing Codex plugin root'); const hook = path.join(root, 'scripts', 'fons-hook.mjs'); const args = process.argv.splice(1); import(require('node:url').pathToFileURL(hook).href).then((module) => module.runMain(args))\" -- --host=codex",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
