@@ -3,5 +3,5 @@
   "displayName": "Fons · 灵感池",
   "description": "旁路灵感蓄水池插件：消抖合并、延迟确认注入与收尾兜底，避免编码中途插话打断模型跨文件修改心流。",
   "logo": "assets/logo.svg",
-  "version": "0.2.0"
+  "version": "0.3.1"
 }

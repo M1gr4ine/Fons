@@ -18,14 +18,14 @@
 
 ---
 
-## 2. Codex 适配与多宿主抽象
+## 2. 【已完成】Codex 适配与多宿主抽象
 
 - **核心层与宿主层解耦**：
-  - 保持收件箱解析与状态账本层（`scripts/fons-inbox.mjs`、`scripts/fons-store.mjs`）完全宿主无关；
-  - 将 Antigravity 专属的协议字段（`SessionStart` / `PreInvocation` / `Stop` 事件结构、`transcript.jsonl` 解析、`brain` 索引定位）抽离为独立的 `adapters/antigravity.mjs`。
-- **Codex 适配层（`adapters/codex.mjs`）**：
-  - 对接 Codex 的生命周期钩子 / 会话标识与工作区发现机制，映射待投递注入与收尾核对语义；
-  - 为无内置 Sidecar 容器的环境提供轻量本地面板服务或增强 CLI（`fons`）交互，使同一套收件箱格式、单条独立蓄水与撤回机制在 Antigravity 与 Codex 下无缝共用。
+  - 保持收件箱解析与状态账本层（`scripts/fons-inbox.mjs`、`scripts/fons-store.mjs`）及领域引擎（`scripts/fons-engine.mjs`）完全宿主无关；
+  - 将 Antigravity 专属协议抽离为 `adapters/antigravity.mjs`，新增 `adapters/codex.mjs` 与 `adapters/index.mjs`。
+- **Codex 适配层与 MCP Apps 面板**：
+  - 对接 Codex 的 `SessionStart` / `UserPromptSubmit` / `PostToolUse` / `Stop` 钩子、主线程锚定与工作区/无项目识别，支持 `fons codex init` 一键打包本地插件市场；
+  - 提供基于 MCP Apps 的 Codex 原生侧边栏面板（`codex/fons-mcp.mjs`、`codex/fons-mcp-ui.mjs`），与 Antigravity Sidecar 共享同一套收件箱、单条蓄水、附件与撤回体验。
 
 ---
 
@@ -48,3 +48,16 @@
   - **双包作用域互斥**：全局 `ui-plugin` 新增无工作区专属 Hook（`node scripts/bootstrap-hook.mjs`，强制 `--scope=no-workspace` 并与 Hook 共用宿主目录解析），根目录工作区 Hook 限定 `--scope=workspace`，二者天然互斥、零污染普通项目；
   - **统一落盘与索引**：无工作区会话数据存放在 `<appData>/fons/no-workspace/`（与 `<workspace>/.agents/fons/` 同构），索引增加 `scope: "no-workspace"` 并兼容旧工作区索引；
   - **按需首次极简协议与防串台**：无工作区 `PreInvocation` 仅在同会话首次投递时附带极简 `[FONS_ACK: 编号]` 回执提示，后续投递只留 `[FONS]` 与条目；Sidecar 与面板核对 `workspaceUris` 与会话登记的 `scope`/`rootDir` 一致性（覆盖无工作区与多项目间切换），CLI 新增 `-n` / `--no-workspace` 支持。
+
+---
+
+## 5. Claude Code 适配
+
+- **复用无宿主耦合的核心引擎**：
+  - 直接复用现有的收件箱解析（`scripts/fons-inbox.mjs`）、状态账本（`scripts/fons-store.mjs`）与单条蓄水领域引擎（`scripts/fons-engine.mjs`），新增 `adapters/claude.mjs` 并接入 `adapters/index.mjs` 与 `scripts/fons-sessions.mjs`（支持 `--host claude` / `FONS_HOST=claude`）。
+- **生命周期 Hook 与主会话锚定**：
+  - 对接 Claude Code 的生命周期钩子（`SessionStart`、`UserPromptSubmit`、`PostToolUse`、`Stop` 等），过滤子代理（Subagent）调用以锁定主会话，自动完成工作区（`.agents/fons/`）与无工作区会话隔离；
+  - 在收尾阶段增量读取会话 transcript 末行的 `[FONS_ACK: 编号]` 回执并自动回写 `【√】 `，对未处理或未处于编辑暂缓的条目执行有限次自动兜底续跑。
+- **一键配置与多入口协同**：
+  - 提供 `fons claude init`（或 Claude Code 插件包）自动配置 Hook 与回执约定，避免污染已有用户配置；
+  - 共享同一套 `fons` CLI 与 Markdown 收件箱，并为无内置侧栏面板的终端/IDE 环境提供轻量本地灵感池面板支持。

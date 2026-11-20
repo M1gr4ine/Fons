@@ -3,5 +3,5 @@
   "displayName": "灵感池",
   "description": "Fons 会话灵感池侧边栏面板，并提供仅作用于无工作区会话的 Hook（不会干预项目工作区）。",
   "logo": "assets/logo.svg",
-  "version": "0.2.0"
+  "version": "0.3.1"
 }
