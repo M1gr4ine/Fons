@@ -886,3 +886,150 @@ test('no-workspace conversations isolate from workspaces, support full pool CRUD
   assert.equal(store.getMigrationWarning(noWsCtx), null);
   assert.deepEqual(store.migrateLegacyInbox(noWsCtx), { migrated: false });
 });
+
+test('attachments deduplicate by content hash, sanitize unsafe names, keep external markdown links intact, and prune only unreferenced files', (t) => {
+  const ctx = fixture(t);
+  const pngBytes = Buffer.from('89504e470d0a1a0a', 'hex');
+  const docBytes = Buffer.from('# API Spec\n', 'utf8');
+
+  // Add mixed note + two attachments (including unsafe display name and MIME-inferred extension)
+  const firstAdd = store.addIdeas({
+    ...ctx,
+    texts: ['参考 [外部文档](https://example.com/spec) 核对样式'],
+    attachments: [
+      { name: '../CON.png', mimeType: 'image/png', dataBase64: pngBytes.toString('base64') },
+      { name: '接口说明 [v1].md', mimeType: 'text/markdown', dataBase64: docBytes.toString('base64') },
+    ],
+  });
+  assert.equal(firstAdd.count, 1);
+
+  // Add pure-attachment item sharing the exact same PNG content
+  const secondAdd = store.addIdeas({
+    ...ctx,
+    texts: [],
+    attachments: [{ name: '', mimeType: 'image/png', dataBase64: pngBytes.toString('base64') }],
+  });
+  assert.equal(secondAdd.count, 1);
+
+  const snap1 = snapshot(ctx);
+  assert.equal(snap1.items.length, 2);
+  const [mixed, pure] = snap1.items;
+  assert.notEqual(mixed.id, pure.id);
+  assert.equal(mixed.note, '参考 [外部文档](https://example.com/spec) 核对样式');
+  assert.equal(mixed.attachments.length, 2);
+  assert.equal(mixed.attachments[0].name, 'CON.png');
+  assert.equal(mixed.attachments[0].isImage, true);
+  assert.equal(mixed.attachments[0].missing, false);
+  assert.equal(mixed.attachments[0].size, pngBytes.byteLength);
+  assert.equal(mixed.attachments[1].name, '接口说明 (v1).md');
+  assert.equal(mixed.attachments[1].isImage, false);
+
+  assert.equal(pure.note, '');
+  assert.equal(pure.attachments.length, 1);
+  assert.equal(pure.attachments[0].name, 'paste.png');
+  // Both items share the identical storedName because both sanitized to image-<hash8>.png
+  assert.equal(pure.attachments[0].storedName, mixed.attachments[0].storedName);
+
+  const loaded = store.readAttachment({ ...ctx, storedName: mixed.attachments[0].storedName });
+  assert.equal(loaded.mimeType, 'image/png');
+  assert.equal(loaded.dataBase64, pngBytes.toString('base64'));
+
+  // Drop the markdown attachment and clear the note on the first item -> doc file is pruned, shared PNG stays
+  const docFile = path.join(paths(ctx).attachmentsDir, mixed.attachments[1].storedName);
+  const pngFile = path.join(paths(ctx).attachmentsDir, mixed.attachments[0].storedName);
+  assert.equal(fs.existsSync(docFile), true);
+  const updateRes = store.updateIdeaText({
+    ...mutation(ctx, mixed),
+    newText: '',
+    keepAttachments: [mixed.attachments[0].storedName],
+  });
+  assert.equal(updateRes.conflict, false);
+  assert.equal(fs.existsSync(docFile), false);
+  assert.equal(fs.existsSync(pngFile), true);
+
+  // Removing the first item still keeps shared PNG for the second item
+  const updatedFirst = snapshot(ctx).items[0];
+  assert.equal(store.removeIdea(mutation(ctx, updatedFirst)).conflict, false);
+  assert.equal(fs.existsSync(pngFile), true);
+
+  // Archiving a completed item rewrites link relative to archive/ while keeping duplicate deliveryId stable
+  const remainingPure = snapshot(ctx).items[0];
+  store.completeIdea({ ...ctx, token: remainingPure.token });
+  // Add an identical pending item BEFORE archiving so we can verify its deliveryId never drifts across archive
+  const dupBefore = store.addIdeas({
+    ...ctx,
+    texts: [],
+    attachments: [{ name: '', mimeType: 'image/png', dataBase64: pngBytes.toString('base64') }],
+  });
+  assert.equal(dupBefore.count, 1);
+  const idBeforeArchive = snapshot(ctx).items.find((row) => row.status === 'buffering').id;
+
+  assert.equal(store.archiveCompleted(ctx).count, 1);
+  assert.equal(fs.existsSync(pngFile), true);
+  const archivedText = fs.readFileSync(paths(ctx).archive, 'utf8').trim();
+  const hrefMatch = /\((\.\.\/attachments\/[^)]+)\)/.exec(archivedText);
+  assert.ok(hrefMatch, `archive link should use ../attachments/...: ${archivedText}`);
+  assert.equal(fs.existsSync(path.resolve(path.dirname(paths(ctx).archive), hrefMatch[1])), true);
+
+  const dupAfterArchive = snapshot(ctx).items[0];
+  assert.equal(dupAfterArchive.id, idBeforeArchive, 'deliveryId stays identical after moving completion to archive/');
+  assert.equal(store.removeIdea(mutation(ctx, dupAfterArchive)).conflict, false);
+  assert.equal(fs.existsSync(pngFile), true, 'archived reference still protects attachment from GC');
+
+  // Add and remove a fresh unshared buffering attachment -> file is cleaned up
+  const freshBytes = Buffer.from('temp-log', 'utf8');
+  store.addIdeas({ ...ctx, texts: ['临时日志'], attachments: [{ name: 'run.log', buffer: freshBytes }] });
+  const freshItem = snapshot(ctx).items[0];
+  const freshPath = path.join(paths(ctx).attachmentsDir, freshItem.attachments[0].storedName);
+  assert.equal(fs.existsSync(freshPath), true);
+  assert.equal(store.removeIdea(mutation(ctx, freshItem)).conflict, false);
+  assert.equal(fs.existsSync(freshPath), false);
+});
+
+test('editing an idea preserves leading list characters like "- " and single "-" without vanishing into an empty row', (t) => {
+  const ctx = fixture(t);
+  store.addIdeas({ ...ctx, texts: ['初始文本'] });
+  const first = snapshot(ctx).items[0];
+
+  const dashPrefixed = store.updateIdeaText({ ...mutation(ctx, first), newText: '- 调整参数' });
+  assert.equal(dashPrefixed.conflict, false);
+  const afterDashPrefix = snapshot(ctx).items[0];
+  assert.equal(afterDashPrefix.text, '- 调整参数');
+  assert.equal(afterDashPrefix.note, '- 调整参数');
+
+  const singleDash = store.updateIdeaText({ ...mutation(ctx, afterDashPrefix), newText: '-' });
+  assert.equal(singleDash.conflict, false);
+  const afterSingleDash = snapshot(ctx).items[0];
+  assert.equal(afterSingleDash.text, '-');
+  assert.equal(afterSingleDash.note, '-');
+
+  assert.throws(() => store.updateIdeaText({ ...mutation(ctx, afterSingleDash), newText: '   ' }), /不能为空/);
+  assert.equal(snapshot(ctx).items[0].text, '-');
+});
+
+test('attachment bounds and foreign storedName references are rejected cleanly', (t) => {
+  const ctx = fixture(t);
+  assert.throws(
+    () => store.addIdeas({ ...ctx, texts: ['empty'], attachments: [{ name: 'empty.png', dataBase64: '' }] }),
+    { code: 'FONS_INVALID_ATTACHMENT' },
+  );
+  const tooMany = Array.from({ length: store.MAX_ITEM_ATTACHMENTS + 1 }, (_, i) => ({
+    name: `f-${i}.txt`,
+    buffer: Buffer.from(`v-${i}`),
+  }));
+  assert.throws(
+    () => store.addIdeas({ ...ctx, texts: ['overflow'], attachments: tooMany }),
+    { code: 'FONS_INVALID_ATTACHMENT' },
+  );
+  assert.throws(() => store.readAttachment({ ...ctx, storedName: '../secret-12345678.png' }), {
+    code: 'FONS_INVALID_ATTACHMENT',
+  });
+
+  store.addIdeas({ ...ctx, texts: ['plain'] });
+  const plain = snapshot(ctx).items[0];
+  assert.throws(
+    () => store.updateIdeaText({ ...mutation(ctx, plain), newText: 'plain', keepAttachments: ['foreign-12345678.png'] }),
+    { code: 'FONS_INVALID_ATTACHMENT' },
+  );
+  assert.equal(fs.existsSync(paths(ctx).attachmentsDir), false);
+});

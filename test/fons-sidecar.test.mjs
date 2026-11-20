@@ -281,6 +281,57 @@ test('no-workspace and cross-project sessions enforce exact workspaceUris matchi
   assert.equal((await read(ctx, { conversationId: SESSION, workspaceUris: [123] })).status, 400);
 });
 
+test('attachment upload, preview fetch, row attachment updates and path traversal guards work end-to-end', async (t) => {
+  const ctx = await mounted(t);
+  await register(ctx);
+  await register(ctx, OTHER);
+  const imgBase64 = Buffer.from('fake-png-bytes').toString('base64');
+  const pdfBase64 = Buffer.from('%PDF-1.7').toString('base64');
+
+  // Reject missing/malformed payloads and path traversal on attachment fetch; empty texts array stays no-op
+  assert.equal((await post(ctx, 'add', {})).status, 400);
+  assert.equal((await post(ctx, 'add', { texts: [], attachments: [{ name: 'bad.png', dataBase64: '' }] })).status, 400);
+  assert.deepEqual(await post(ctx, 'add', { texts: [] }), { count: 0, texts: [] });
+  assert.equal((await post(ctx, 'attachment', { storedName: '../escape-12345678.png' })).status, 400);
+  assert.equal((await post(ctx, 'attachment', { storedName: 'missing-12345678.png' })).status, 404);
+
+  // Add pure-attachment and mixed items
+  const added = await post(ctx, 'add', {
+    texts: ['检查布局'],
+    attachments: [
+      { name: 'shot.png', mimeType: 'image/png', dataBase64: imgBase64 },
+      { name: 'spec.pdf', mimeType: 'application/pdf', dataBase64: pdfBase64 },
+    ],
+  });
+  assert.equal(added.count, 1);
+
+  let snap = await read(ctx);
+  assert.equal(snap.items.length, 1);
+  assert.equal(snap.items[0].note, '检查布局');
+  assert.equal(snap.items[0].attachments.length, 2);
+  const [imgAtt, pdfAtt] = snap.items[0].attachments;
+
+  const fetched = await post(ctx, 'attachment', { storedName: imgAtt.storedName });
+  assert.equal(fetched.mimeType, 'image/png');
+  assert.equal(fetched.dataBase64, imgBase64);
+  // Another session cannot read SESSION's isolated attachment
+  assert.equal((await post(ctx, 'attachment', { conversationId: OTHER, storedName: imgAtt.storedName })).status, 404);
+
+  // Update row to remove PDF and clear note (leaving pure image item)
+  const updated = await post(ctx, 'update', {
+    rowIndex: snap.items[0].rowIndex,
+    expectedRaw: snap.items[0].raw,
+    newText: '',
+    keepAttachments: [imgAtt.storedName],
+  });
+  assert.equal(updated.conflict, false);
+  assert.equal((await post(ctx, 'attachment', { storedName: pdfAtt.storedName })).status, 404);
+
+  snap = await read(ctx);
+  assert.equal(snap.items[0].note, '');
+  assert.equal(snap.items[0].attachments.length, 1);
+});
+
 const sdkDirectory = path.join(os.homedir(), '.gemini', 'antigravity', 'lib', 'node_modules', 'sidecar_sdk');
 const sdkIndex = path.join(sdkDirectory, 'index.mjs');
 const sdkLoader = path.join(sdkDirectory, 'register_loader.js');

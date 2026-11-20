@@ -325,3 +325,27 @@ test('CLI supports no-workspace sessions via -s and --no-workspace without leaki
   assert.match(ambiguous.stderr, new RegExp(A));
   assert.match(ambiguous.stderr, new RegExp(B));
 });
+
+test('CLI -a / --attach stores attachments, supports pure-attachment items, and formats list output', (t) => {
+  const { root } = setup(t, '');
+  const imgFile = path.join(root, 'ui-shot.png');
+  const docFile = path.join(root, 'notes.md');
+  fs.writeFileSync(imgFile, Buffer.from('png-bytes'));
+  fs.writeFileSync(docFile, '# Ref\n', 'utf8');
+
+  const mixed = run(root, ['-a', imgFile, `--attach=${docFile}`, '核对边距']);
+  assert.equal(mixed.status, 0, mixed.stderr);
+  assert.match(mixed.stdout, /核对边距 \[附件: ui-shot\.png, notes\.md\]/);
+
+  const pure = run(root, ['-a', imgFile]);
+  assert.equal(pure.status, 0, pure.stderr);
+  assert.match(pure.stdout, /\[附件: ui-shot\.png\]/);
+
+  const listed = run(root, ['list']);
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /1\. 核对边距 \[附件: ui-shot\.png, notes\.md\]/);
+  assert.match(listed.stdout, /2\. \[附件: ui-shot\.png\]/);
+
+  assert.notEqual(run(root, ['-a', path.join(root, 'missing.png'), 'bad']).status, 0);
+  assert.notEqual(run(root, ['-a', imgFile, 'list']).status, 0);
+});

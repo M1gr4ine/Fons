@@ -1,18 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isValidStoredName } from '../../scripts/fons-inbox.mjs';
 import {
-  addIdeas, archiveCompleted, completeIdea, findAppData, getMigrationWarning,
-  holdEditing, isValidSessionId, lookupConversation, readPoolSnapshot, releaseEditing,
-  removeIdea, reopenIdea, stampPoolTimers, updateIdeaText,
+  MAX_ATTACHMENT_BYTES, MAX_ITEM_ATTACHMENTS, addIdeas, archiveCompleted, completeIdea,
+  findAppData, getMigrationWarning, holdEditing, isValidSessionId, lookupConversation,
+  readAttachment, readPoolSnapshot, releaseEditing, removeIdea, reopenIdea, stampPoolTimers,
+  updateIdeaText,
 } from '../../scripts/fons-store.mjs';
 
 const page = new URL('./index.html', import.meta.url);
+const MAX_UPLOAD_BASE64 = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + 16;
 const rowFields = ['rowIndex', 'expectedRaw'];
 const operations = {
-  add: [addIdeas, ['texts']],
+  add: [addIdeas, ['texts', 'attachments']],
   complete: [completeIdea, ['token']],
-  update: [updateIdeaText, [...rowFields, 'newText']],
+  update: [updateIdeaText, [...rowFields, 'newText', 'keepAttachments', 'newAttachments']],
   remove: [removeIdea, rowFields],
   reopen: [reopenIdea, rowFields],
   archive: [archiveCompleted, []],
@@ -24,13 +27,35 @@ function jsonError(status, error) {
   return { status, contentType: 'application/json', body: JSON.stringify({ error }) };
 }
 
+function isValidUploadEntry(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  if (typeof v.name !== 'string' || !v.name.trim() || v.name.length > 255) return false;
+  if (v.mimeType !== undefined && (typeof v.mimeType !== 'string' || v.mimeType.length > 128)) return false;
+  return typeof v.dataBase64 === 'string' && v.dataBase64.length > 0 && v.dataBase64.length <= MAX_UPLOAD_BASE64;
+}
+
+function isOptionalUploadList(v) {
+  return v === undefined || (Array.isArray(v) && v.length <= MAX_ITEM_ATTACHMENTS && v.every(isValidUploadEntry));
+}
+
 const valid = {
   id: (v) => typeof v === 'string' && /^[a-f0-9]{12}$/.test(v),
   rowIndex: (v) => Number.isSafeInteger(v) && v >= 0,
   expectedRaw: (v) => typeof v === 'string',
-  newText: (v) => typeof v === 'string' && v.trim().length > 0,
+  newText: (v, data) => typeof v === 'string' && (
+    v.trim().length > 0 ||
+    (Array.isArray(data.keepAttachments) && data.keepAttachments.length > 0) ||
+    (Array.isArray(data.newAttachments) && data.newAttachments.length > 0)
+  ),
   token: (v) => typeof v === 'string' && /^[0-9]+-[a-f0-9]{64}$/.test(v),
-  texts: (v) => Array.isArray(v) && v.every((s) => typeof s === 'string'),
+  texts: (v, data) => (
+    v === undefined
+      ? Array.isArray(data.attachments) && data.attachments.length > 0
+      : Array.isArray(v) && v.every((s) => typeof s === 'string')
+  ),
+  attachments: isOptionalUploadList,
+  keepAttachments: (v) => v === undefined || (Array.isArray(v) && v.length <= MAX_ITEM_ATTACHMENTS && v.every(isValidStoredName)),
+  newAttachments: isOptionalUploadList,
 };
 
 function freshTimerTexts(result) {
@@ -82,12 +107,19 @@ function hasWorkspaceMismatch(entry, workspaceUris) {
   return entry.scope !== 'workspace' || !workspaceMatchesRoot(workspaceUris, entry.rootDir);
 }
 
+function readAttachmentRoute(context, data) {
+  if (!isValidStoredName(data.storedName)) return jsonError(400, '无效参数：storedName');
+  const attachment = readAttachment({ ...context, storedName: data.storedName });
+  if (!attachment) return jsonError(404, '附件不存在或已被清理。');
+  return attachment;
+}
+
 function mutate(operation, fields) {
   return (context, data) => {
     const options = { ...context };
     for (const field of fields) {
-      if (!valid[field](data[field])) return jsonError(400, '无效参数：' + field);
-      options[field] = data[field];
+      if (!valid[field](data[field], data)) return jsonError(400, '无效参数：' + field);
+      if (data[field] !== undefined) options[field] = data[field];
     }
     try {
       const result = operation(options);
@@ -97,6 +129,7 @@ function mutate(operation, fields) {
       return result;
     } catch (error) {
       if (error.code === 'FONS_STALE_TOKEN') return { conflict: true };
+      if (error.code === 'FONS_INVALID_ATTACHMENT') return jsonError(400, error.message);
       throw error;
     }
   };
@@ -124,6 +157,7 @@ function boundHandler(appData, action) {
 export function mountPoolRoutes(app, appData) {
   app.page('/', () => fs.readFileSync(page, 'utf8'));
   app.api('/api/pool', boundHandler(appData, readPool), 'POST');
+  app.api('/api/pool/attachment', boundHandler(appData, readAttachmentRoute), 'POST');
   for (const [name, [operation, fields]] of Object.entries(operations)) {
     app.api('/api/pool/' + name, boundHandler(appData, mutate(operation, fields)), 'POST');
   }

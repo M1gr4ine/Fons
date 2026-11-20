@@ -1,17 +1,18 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { splitIdeaText } from './fons-inbox.mjs';
 import {
-  addIdeas, archiveCompleted, completeIdea, getMigrationWarning,
-  listConversations, lookupConversation, readPoolSnapshot,
+  MAX_ATTACHMENT_BYTES, MAX_ITEM_ATTACHMENTS, addIdeas, archiveCompleted, completeIdea,
+  getMigrationWarning, listConversations, lookupConversation, readPoolSnapshot,
 } from './fons-store.mjs';
 
 const USAGE = `用法:
-  fons [-s <会话ID> | -n | --no-workspace] "<灵感内容>"  向本会话收件箱追加待办条目
-  fons [-s <会话ID> | -n | --no-workspace] list          查看待处理条目及其确认令牌
-  fons [-s <会话ID> | -n | --no-workspace] done <令牌...> 仅确认指定条目（【√】）
-  fons [-s <会话ID> | -n | --no-workspace] archive       归档已完成条目
-  fons help                                              显示帮助`;
+  fons [-s <会话ID> | -n | --no-workspace] [-a <文件路径>...] ["<灵感内容>"]  向本会话收件箱追加待办条目
+  fons [-s <会话ID> | -n | --no-workspace] list                             查看待处理条目及其确认令牌
+  fons [-s <会话ID> | -n | --no-workspace] done <令牌...>                   仅确认指定条目（【√】）
+  fons [-s <会话ID> | -n | --no-workspace] archive                          归档已完成条目
+  fons help                                                                 显示帮助`;
 
 function findWorkspaceRoot(startDir) {
   let dir = path.resolve(startDir);
@@ -25,12 +26,27 @@ function findWorkspaceRoot(startDir) {
 
 function parseOptions(args) {
   const positional = [];
+  const attachPaths = [];
   let sessionId;
   let noWorkspace = false;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === '-n' || arg === '--no-workspace') {
       noWorkspace = true;
+      continue;
+    }
+    if (arg === '-a' || arg === '--attach') {
+      const target = args[index + 1];
+      if (!target || target.startsWith('-')) {
+        throw new Error('请为 -a 或 --attach 指定一个文件路径。');
+      }
+      attachPaths.push(args[++index]);
+      continue;
+    }
+    if (arg.startsWith('--attach=')) {
+      const target = arg.slice('--attach='.length).trim();
+      if (!target) throw new Error('请为 -a 或 --attach 指定一个文件路径。');
+      attachPaths.push(target);
       continue;
     }
     if (arg !== '-s' && arg !== '--session') { positional.push(arg); continue; }
@@ -42,7 +58,15 @@ function parseOptions(args) {
   if (noWorkspace && sessionId !== undefined) {
     throw new Error('不能同时指定 -s/--session 和 -n/--no-workspace。');
   }
-  return { args: positional, sessionId: noWorkspace ? undefined : (sessionId ?? process.env.FONS_SESSION?.trim()), noWorkspace };
+  if (attachPaths.length > MAX_ITEM_ATTACHMENTS) {
+    throw new Error(`单条灵感最多添加 ${MAX_ITEM_ATTACHMENTS} 个附件。`);
+  }
+  return {
+    args: positional,
+    attachPaths,
+    sessionId: noWorkspace ? undefined : (sessionId ?? process.env.FONS_SESSION?.trim()),
+    noWorkspace,
+  };
 }
 
 function formatRegisteredAt(value) {
@@ -95,6 +119,13 @@ function checkMigration(context) {
   process.stderr.write('提示：' + message + '\n');
 }
 
+function formatDisplayText(text, sessionId) {
+  const { note, attachments } = splitIdeaText(text, sessionId);
+  if (!attachments.length) return text;
+  const names = attachments.map((att) => att.name).join(', ');
+  return note ? `${note} [附件: ${names}]` : `[附件: ${names}]`;
+}
+
 function cmdList(context) {
   const seen = new Set();
   const active = readPoolSnapshot(context).items.filter((item) => {
@@ -106,7 +137,9 @@ function cmdList(context) {
     process.stdout.write('当前无待处理灵感。\n');
     return;
   }
-  process.stdout.write(active.map((item, i) => (i + 1) + '. ' + item.text + ' [' + item.token + ']').join('\n') + '\n');
+  process.stdout.write(active.map((item, i) => (
+    `${i + 1}. ${formatDisplayText(item.text, context.sessionId)} [${item.token}]`
+  )).join('\n') + '\n');
 }
 
 function cmdDone(context, tokens) {
@@ -123,31 +156,48 @@ function cmdArchive(context) {
   process.stdout.write('已归档 ' + count + ' 条已完成灵感。\n');
 }
 
-function cmdAdd(context, rawArgs) {
-  const result = addIdeas({ ...context, texts: [rawArgs.join(' ')] });
-  if (!result.count) throw new Error('灵感内容不能为空。');
-  process.stdout.write('已记录灵感：' + result.texts[0] + '\n');
+function loadCliAttachments(attachPaths) {
+  return attachPaths.map((filePath) => {
+    const resolved = path.resolve(filePath);
+    const stat = fs.statSync(resolved, { throwIfNoEntry: false });
+    if (!stat || !stat.isFile()) throw new Error(`找不到附件文件：${filePath}`);
+    if (!stat.size) throw new Error(`附件内容不能为空：${filePath}`);
+    if (stat.size > MAX_ATTACHMENT_BYTES) throw new Error(`单个附件不能超过 10 MB：${filePath}`);
+    return { name: path.basename(resolved), buffer: fs.readFileSync(resolved) };
+  });
 }
 
-function run(context, args) {
+function cmdAdd(context, rawArgs, attachPaths = []) {
+  const attachments = loadCliAttachments(attachPaths);
+  const texts = rawArgs.length ? [rawArgs.join(' ')] : [];
+  const result = addIdeas({ ...context, texts, attachments });
+  if (!result.count) throw new Error('灵感内容不能为空。');
+  process.stdout.write('已记录灵感：' + formatDisplayText(result.texts[0], context.sessionId) + '\n');
+}
+
+function run(context, args, attachPaths) {
+  const isBuiltinSubcmd = (args[0] === 'list' && args.length === 1) || args[0] === 'done' || args[0] === 'archive';
+  if (attachPaths.length && isBuiltinSubcmd) {
+    throw new Error(`"${args[0]}" 子命令不支持 -a/--attach 参数。`);
+  }
   if (args[0] === 'list' && args.length === 1) return cmdList(context);
   if (args[0] === 'done') return cmdDone(context, args.slice(1));
   if (args[0] === 'archive') {
     if (args.length !== 1) throw new Error('不支持的参数 "' + args.slice(1).join(' ') + '"。');
     return cmdArchive(context);
   }
-  return cmdAdd(context, args);
+  return cmdAdd(context, args, attachPaths);
 }
 
 try {
   const options = parseOptions(process.argv.slice(2));
-  if (!options.args.length) throw new Error(USAGE);
-  if (options.args.length === 1 && ['help', '--help', '-h'].includes(options.args[0])) {
+  if (!options.args.length && !options.attachPaths.length) throw new Error(USAGE);
+  if (!options.attachPaths.length && options.args.length === 1 && ['help', '--help', '-h'].includes(options.args[0])) {
     process.stdout.write(USAGE + '\n');
   } else {
     const context = resolveSession(options);
     checkMigration(context);
-    run(context, options.args);
+    run(context, options.args, options.attachPaths);
   }
 } catch (error) {
   process.stderr.write('错误：' + error.message + '\n');

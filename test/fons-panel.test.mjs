@@ -15,8 +15,14 @@ class Element {
   remove() { if (!this.parentElement) return; const i = this.parentElement.children.indexOf(this); if (i >= 0) this.parentElement.children.splice(i, 1); this.parentElement = null; this.isConnected = false; }
   closest(selector) { const cls = selector.startsWith('.') ? selector.slice(1) : null; for (let cur = this; cur; cur = cur.parentElement) { if (cls && String(cur.className || '').split(/\s+/).includes(cls)) return cur; } return null; }
   cloneNode(deep) { const copy = new Element(); copy.tag = this.tag; copy.className = this.className; copy.dataset = { ...this.dataset }; copy.textContent = this.textContent; if (deep) copy.append(...this.children.map((c) => c.cloneNode(true))); return copy; }
-  setAttribute() {}
-  querySelector(selector) { return this.children.find((child) => child.tag === selector || `.${child.className}` === selector); }
+  setAttribute(name, value) { this[name] = value; }
+  querySelector(selector) {
+    const cls = selector.startsWith('.') ? selector.slice(1) : null;
+    return this.children.find((child) => (
+      child.tag === selector ||
+      (cls && String(child.className || '').split(/\s+/).includes(cls))
+    ));
+  }
 }
 
 function deferred() {
@@ -27,7 +33,20 @@ function deferred() {
 
 function harness({ host = true, secureFetch = true } = {}) {
   const elements = new Map();
-  for (const selector of ['.rows', '.empty', '[data-testid="fons-quick-add"]', '[data-testid="fons-flow-mode"]', '[data-testid="fons-archive"]', '.warning', '.notice', '.pool']) elements.set(selector, new Element());
+  for (const selector of [
+    '.rows', '.empty', '[data-testid="fons-quick-add"]', '[data-testid="fons-quick-box"]',
+    '[data-testid="fons-quick-drafts"]', '[data-testid="fons-attach"]', '[data-testid="fons-file-input"]',
+    '[data-testid="fons-quick-submit"]', '[data-testid="fons-drop-banner"]', '[data-testid="fons-lightbox"]',
+    '[data-testid="fons-flow-mode"]', '[data-testid="fons-archive"]', '.warning', '.notice', '.pool',
+  ]) elements.set(selector, new Element());
+  const lightbox = elements.get('[data-testid="fons-lightbox"]');
+  lightbox.hidden = true;
+  const lightboxImg = new Element();
+  lightboxImg.className = 'lightbox-img';
+  const lightboxCap = new Element();
+  lightboxCap.className = 'lightbox-caption';
+  lightbox.append(lightboxImg, lightboxCap);
+  const docListeners = {};
   const requests = [];
   let workspaceChange;
   let tick;
@@ -39,8 +58,8 @@ function harness({ host = true, secureFetch = true } = {}) {
   const sidecar = { conversationId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', fetch(url, options) { const response = deferred(); requests.push({ url, options, ...response }); return response.promise; } };
   if (host) sidecar.onWorkspaceChange = (callback) => { workspaceChange = callback; return () => {}; };
   if (!secureFetch) delete sidecar.fetch;
-  const document = { hidden: false, activeElement: null, querySelector: (selector) => elements.get(selector), querySelectorAll: () => [], createElement(tag) { const el = new Element(); el.tag = tag; return el; }, addEventListener() {} };
-  vm.runInNewContext(script, { window: { sidecar, localStorage }, document, location: { search: '' }, URLSearchParams, Promise, Date, setTimeout: () => 0, clearTimeout() {}, setInterval: (callback) => { tick = callback; }, queueMicrotask, fetch: sidecar.fetch });
+  const document = { hidden: false, activeElement: null, listeners: docListeners, querySelector: (selector) => elements.get(selector), querySelectorAll: () => [], createElement(tag) { const el = new Element(); el.tag = tag; return el; }, addEventListener(name, cb) { docListeners[name] = cb; } };
+  vm.runInNewContext(script, { window: { sidecar, localStorage }, document, location: { search: '' }, URLSearchParams, Promise, Date, Buffer, Uint8Array, Array, setTimeout: () => 0, clearTimeout() {}, setInterval: (callback) => { tick = callback; }, queueMicrotask, fetch: sidecar.fetch });
   return { elements, requests, sidecar, storage, document, workspace: (value) => workspaceChange(value), tick };
 }
 
@@ -568,4 +587,223 @@ test('deleting a row whose textarea was cleared or conflicted externally still d
   assert.equal(panel.elements.get('.notice').textContent, '内容已被修改');
   assert.equal(panel.elements.get('.rows').children.length, 0);
   assert.equal(panel.elements.get('.pool').dataset.phase, 'idle');
+});
+
+test('paste screenshot and drag-and-drop files render image thumbnails and file blocks, submit pure or mixed drafts, cache thumbnails, and remove attachments', async () => {
+  const panel = harness();
+  await openRegistered(panel);
+  const quick = panel.elements.get('[data-testid="fons-quick-add"]');
+  const drafts = panel.elements.get('[data-testid="fons-quick-drafts"]');
+  const pool = panel.elements.get('.pool');
+  const lightbox = panel.elements.get('[data-testid="fons-lightbox"]');
+
+  const fakePng = {
+    name: 'shot.png',
+    type: 'image/png',
+    size: 4,
+    async arrayBuffer() { return Uint8Array.from([137, 80, 78, 71]).buffer; },
+  };
+  const fakeDoc = {
+    name: 'design.pdf',
+    type: 'application/pdf',
+    size: 2048,
+    async arrayBuffer() { return Buffer.from('%PDF'); },
+  };
+
+  // 1) Paste screenshot into quick input + drop PDF onto pool -> renders image preview & file card
+  quick.listeners.paste({
+    clipboardData: { files: [fakePng], getData: () => '' },
+    preventDefault() {},
+  });
+  await settle();
+  await settle();
+  pool.listeners.drop({
+    target: pool,
+    dataTransfer: { types: ['Files'], files: [fakeDoc] },
+    preventDefault() {},
+  });
+  await settle();
+  await settle();
+
+  assert.equal(drafts.hidden, false);
+  assert.equal(drafts.children.length, 2);
+  assert.equal(drafts.children[0].dataset.testid, 'fons-att-image');
+  assert.equal(drafts.children[1].dataset.testid, 'fons-att-file');
+  assert.equal(panel.elements.get('[data-testid="fons-quick-submit"]').disabled, false);
+
+  // 2) Submit with empty text (pure attachments) -> failed write restores drafts, retry succeeds
+  quick.listeners.keydown({ key: 'Enter', isComposing: false, preventDefault() {} });
+  await settle();
+  assert.equal(panel.requests[1].url, '/api/pool/add');
+  const sentBody = JSON.parse(panel.requests[1].options.body);
+  assert.deepEqual(sentBody.texts, []);
+  assert.equal(sentBody.attachments.length, 2);
+  assert.equal(sentBody.attachments[0].name, 'shot.png');
+
+  panel.requests[1].resolve(response({ error: '网络抖动' }, 500));
+  await settle();
+  panel.requests[2].resolve(response(snapshot()));
+  await settle();
+  assert.equal(drafts.children.length, 2, 'failed submit restores draft attachments');
+
+  // Remove the PDF draft chip, keep image draft, add note and submit
+  drafts.children[1].querySelector('.att-remove').listeners.click({ stopPropagation() {} });
+  assert.equal(drafts.children.length, 1);
+  quick.value = '检查按钮对齐';
+  quick.listeners.keydown({ key: 'Enter', isComposing: false, preventDefault() {} });
+  await settle();
+  assert.equal(panel.requests[3].url, '/api/pool/add');
+  panel.requests[3].resolve(response({ count: 1 }));
+  await settle();
+
+  // 3) Poll snapshot returns buffering row with image + file attachment -> fetches thumbnail once and caches it
+  const rowSnapshot = {
+    registered: true,
+    items: [{
+      id: 'aaaaaaaaaaaa',
+      token: 'tok-att-1',
+      status: 'buffering',
+      text: '检查按钮对齐 [shot.png](attachments/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/shot-12345678.png) [spec.md](attachments/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/spec-87654321.md)',
+      note: '检查按钮对齐',
+      raw: '- [ ] raw\n',
+      rowIndex: 0,
+      remainingMs: 30000,
+      editingHold: false,
+      attachments: [
+        { name: 'shot.png', storedName: 'shot-12345678.png', size: 120, isImage: true, missing: false },
+        { name: 'spec.md', storedName: 'spec-87654321.md', size: 512, isImage: false, missing: false },
+      ],
+    }],
+    etag: 'etag-att-1',
+    debounceMs: 45000,
+    canArchive: false,
+  };
+  panel.requests[4].resolve(response(rowSnapshot));
+  await settle();
+
+  // Thumbnail fetch triggered for shot-12345678.png
+  const thumbReq = panel.requests.find((r) => r.url === '/api/pool/attachment');
+  assert.ok(thumbReq);
+  assert.equal(JSON.parse(thumbReq.options.body).storedName, 'shot-12345678.png');
+  thumbReq.resolve(response({ storedName: 'shot-12345678.png', mimeType: 'image/png', size: 4, dataBase64: 'iVBORw==' }));
+  await settle();
+
+  const [row] = panel.elements.get('.rows').children;
+  row.isConnected = true;
+  const rowAtts = row.querySelector('.row-attachments');
+  assert.equal(rowAtts.hidden, false);
+  assert.equal(rowAtts.children.length, 2);
+  const imgEl = rowAtts.children[0].querySelector('img');
+  assert.match(imgEl.src, /^data:image\/png;base64,/);
+
+  // Clicking image opens lightbox; Escape closes it
+  imgEl.listeners.click();
+  assert.equal(lightbox.hidden, false);
+  panel.document.listeners.keydown({ key: 'Escape', preventDefault() {} });
+  assert.equal(lightbox.hidden, true);
+
+  // Removing one attachment on buffering row calls update with remaining keepAttachments
+  const beforeCount = panel.requests.length;
+  rowAtts.children[1].querySelector('.att-remove').listeners.click({ stopPropagation() {} });
+  await settle();
+  const updateReq = panel.requests[beforeCount];
+  assert.equal(updateReq.url, '/api/pool/update');
+  assert.deepEqual(JSON.parse(updateReq.options.body).keepAttachments, ['shot-12345678.png']);
+  updateReq.resolve(response({ conflict: false }));
+  await settle();
+  panel.requests.at(-1).resolve(response({ unchanged: true, etag: 'etag-att-1' }));
+  await settle();
+});
+
+test('pressing Enter immediately after pasting a slow screenshot waits for file read and sends note + image together', async () => {
+  const panel = harness();
+  await openRegistered(panel);
+  const quick = panel.elements.get('[data-testid="fons-quick-add"]');
+  quick.value = '配文说明';
+  quick.listeners.input();
+
+  const slowRead = deferred();
+  const slowPng = {
+    name: 'slow.png',
+    type: 'image/png',
+    size: 4,
+    arrayBuffer() { return slowRead.promise; },
+  };
+
+  // Paste screenshot and immediately press Enter twice before arrayBuffer() resolves
+  quick.listeners.paste({
+    clipboardData: { files: [slowPng], getData: () => '' },
+    preventDefault() {},
+  });
+  quick.listeners.keydown({ key: 'Enter', isComposing: false, preventDefault() {} });
+  quick.listeners.keydown({ key: 'Enter', isComposing: false, preventDefault() {} });
+  await settle();
+
+  // Must NOT send a premature text-only request while file is still being read
+  assert.equal(panel.requests.length, 1);
+  assert.equal(quick.value, '配文说明');
+
+  // Once the screenshot finishes reading, both note and screenshot are submitted in a single add call
+  slowRead.resolve(Uint8Array.from([137, 80, 78, 71]).buffer);
+  await settle();
+  await settle();
+
+  const addReqs = panel.requests.filter((r) => r.url === '/api/pool/add');
+  assert.equal(addReqs.length, 1);
+  const payload = JSON.parse(addReqs[0].options.body);
+  assert.deepEqual(payload.texts, ['配文说明']);
+  assert.equal(payload.attachments.length, 1);
+  assert.equal(payload.attachments[0].name, 'slow.png');
+  assert.equal(quick.value, '');
+});
+
+test('dropping files onto a row whose blur save is in flight snapshots live FileList before browser clears it', async () => {
+  const panel = harness();
+  await openRegistered(panel);
+  const pool = panel.elements.get('.pool');
+  const [row] = panel.elements.get('.rows').children;
+  row.isConnected = true;
+
+  // Trigger an in-flight blur save on the buffering row
+  const input = row.querySelector('textarea');
+  input.value = '正在保存的新正文';
+  input.listeners.input();
+  input.listeners.blur();
+  await settle();
+  assert.equal(panel.requests[1].url, '/api/pool/update');
+
+  // Simulate HTML spec live DataTransfer.files: populated during synchronous drop dispatch, cleared immediately after
+  const liveBacking = [{
+    name: 'dropped.png',
+    type: 'image/png',
+    size: 4,
+    async arrayBuffer() { return Uint8Array.from([1, 2, 3, 4]).buffer; },
+  }];
+  const liveFileList = {
+    get length() { return liveBacking.length; },
+    [Symbol.iterator]() { return liveBacking[Symbol.iterator](); },
+  };
+
+  pool.listeners.drop({
+    target: row,
+    dataTransfer: { types: ['Files'], files: liveFileList },
+    preventDefault() {},
+  });
+  // Browser clears live DataTransfer.files as soon as drop handler returns synchronously
+  liveBacking.length = 0;
+
+  // Complete the in-flight blur save + its poll refresh
+  panel.requests[1].resolve(response({ conflict: false, updatedText: '正在保存的新正文' }));
+  await settle();
+  panel.requests[2].resolve(response(snapshot('正在保存的新正文')));
+  await settle();
+  await settle();
+
+  // Row attachment update must still fire with the snapshotted file and latest note
+  const attachUpdate = panel.requests.find((r, idx) => idx > 2 && r.url === '/api/pool/update');
+  assert.ok(attachUpdate, 'attachment update should succeed despite live FileList clearing after drop');
+  const updateBody = JSON.parse(attachUpdate.options.body);
+  assert.equal(updateBody.newText, '正在保存的新正文');
+  assert.equal(updateBody.newAttachments.length, 1);
+  assert.equal(updateBody.newAttachments[0].name, 'dropped.png');
 });

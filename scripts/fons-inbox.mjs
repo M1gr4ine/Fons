@@ -3,6 +3,92 @@ import crypto from 'node:crypto';
 export const COMPLETED_PREFIX = '【√】 ';
 const COMPLETED_LINE_RE = /^\s*(?:(?:[-*]\s*)?(?:\[\s*[√✓✔]\s*\]|【\s*[√✓✔]\s*】|[√✓✔])|[-*]\s*\[\s*[xX]\s*\])/;
 const RECEIPT_RE = /^【√】 (.*?) <!-- fons-ack:([0-9]+-[a-f0-9]{64}) -->$/;
+const UUID_PART = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const STORED_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}-[a-f0-9]{8}(?:\.[a-z0-9]{1,16})?$/;
+const TAIL_ATTACHMENT_RE = new RegExp(
+  `(?:^|\\s+)\\[([^\\[\\]\\r\\n]+)\\]\\((attachments\\/(${UUID_PART})\\/([A-Za-z0-9._-]+))\\)$`,
+  'i',
+);
+const TAIL_ARCHIVED_ATTACHMENT_RE = new RegExp(
+  `(?:^|\\s+)\\[([^\\[\\]\\r\\n]+)\\]\\(\\.\\.\\/(attachments\\/(${UUID_PART})\\/([A-Za-z0-9._-]+))\\)$`,
+  'i',
+);
+
+export function isValidStoredName(value) {
+  return typeof value === 'string' && !value.includes('..') && STORED_NAME_RE.test(value);
+}
+
+export function cleanAttachmentLabel(name, fallback = 'attachment') {
+  const cleaned = String(name ?? '')
+    .replace(/[\x00-\x1f\x7f]+/g, ' ')
+    .replace(/\[/g, '(')
+    .replace(/\]/g, ')')
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
+    .trim()
+    .slice(0, 80);
+  return cleaned || fallback;
+}
+
+export function composeIdeaText(note, attachments = [], sessionId) {
+  const cleanNote = String(note ?? '').replace(/[\r\n]+/g, ' ').trim();
+  const seen = new Set();
+  const links = [];
+  for (const item of attachments) {
+    if (!item || !isValidStoredName(item.storedName) || seen.has(item.storedName)) continue;
+    seen.add(item.storedName);
+    const label = cleanAttachmentLabel(item.name, item.storedName);
+    links.push(`[${label}](attachments/${sessionId}/${item.storedName})`);
+  }
+  if (cleanNote && links.length) return `${cleanNote} ${links.join(' ')}`;
+  return cleanNote || links.join(' ');
+}
+
+export function formatArchivedIdeaText(text, sessionId) {
+  const { note, attachments } = splitIdeaText(text, sessionId);
+  if (!attachments.length) return text;
+  const links = attachments.map((att) => `[${cleanAttachmentLabel(att.name, att.storedName)}](../attachments/${sessionId}/${att.storedName})`);
+  return note ? `${note} ${links.join(' ')}` : links.join(' ');
+}
+
+function normalizeArchivedLinks(text) {
+  let remaining = String(text ?? '').trim();
+  const tailLinks = [];
+  while (remaining) {
+    const match = TAIL_ARCHIVED_ATTACHMENT_RE.exec(remaining);
+    if (!match) break;
+    const [, rawName, normalizedRelPath, , storedName] = match;
+    if (!isValidStoredName(storedName)) break;
+    tailLinks.push(`[${rawName}](${normalizedRelPath})`);
+    remaining = remaining.slice(0, match.index).trimEnd();
+  }
+  if (!tailLinks.length) return remaining;
+  tailLinks.reverse();
+  return remaining ? `${remaining} ${tailLinks.join(' ')}` : tailLinks.join(' ');
+}
+
+export function splitIdeaText(text, sessionId) {
+  let remaining = String(text ?? '').trim();
+  const parsed = [];
+  while (remaining) {
+    const match = TAIL_ATTACHMENT_RE.exec(remaining);
+    if (!match) break;
+    const [, rawName, relPath, linkSessionId, storedName] = match;
+    if (!isValidStoredName(storedName)) break;
+    if (sessionId && linkSessionId.toLowerCase() !== sessionId.toLowerCase()) break;
+    parsed.push({ name: rawName.trim() || storedName, storedName, relPath });
+    remaining = remaining.slice(0, match.index).trimEnd();
+  }
+  parsed.reverse();
+  const seen = new Set();
+  const attachments = parsed.filter(({ storedName }) => {
+    if (seen.has(storedName)) return false;
+    seen.add(storedName);
+    return true;
+  });
+  return { note: remaining.trim(), attachments };
+}
 
 export function isCompletedLine(line) {
   return COMPLETED_LINE_RE.test(line);
@@ -11,8 +97,7 @@ export function isCompletedLine(line) {
 export function extractPendingText(line) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith('#') || isCompletedLine(trimmed)) return '';
-  return trimmed.replace(/^[-*]\s*\[\s*\]\s*/, '').replace(/^\[\s*\]\s*/, '')
-    .replace(/^[-*](?:\s+|$)/, '').trim();
+  return trimmed.replace(/^(?:[-*]\s*\[\s*\]|\[\s*\]|[-*](?=\s|$))\s*/, '').trim();
 }
 
 function hash(algorithm, content) {
@@ -76,7 +161,7 @@ export function parseInbox(content) {
 
 export function completedText(line) {
   if (!isCompletedLine(line) || line.includes('<!-- fons-ack:')) return '';
-  return line.replace(COMPLETED_LINE_RE, '').trim();
+  return normalizeArchivedLinks(line.replace(COMPLETED_LINE_RE, '').trim());
 }
 
 function countCompletions(rows, archivedContent) {

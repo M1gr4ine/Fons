@@ -29,8 +29,9 @@
 - **单条独立蓄水消抖**：每条灵感各自计时涨水位，新增条目不会重置旧草稿；点击编辑某条时仅暂缓该条自身计时，保存后重新蓄水。
 - **三态清晰、支持撤回与归档**：待投递（可编辑）→ 已投递（文本锁定，删除时向模型发撤回通知）→ 已完成（一键归档收拢）。
 - **无感自动勾选，零额外工具轮次**：模型处理完后只需在回复末行输出 `[FONS_ACK: 编号]`，由 `Stop` Hook 自动回写 `【√】 ` 前缀；读写模式与只读 Plan 模式均可闭环。
+- **支持截图与参考文件附件**：面板支持拖拽文件、`Ctrl+V` 粘贴截图或点击附件按钮添加图片/文档（展示缩略预览图与文件块，点击小图可放大预览，单文件上限 `10 MB`、单条最多 `8` 个），自动存入会话附件仓并在投递时将路径直接贴给模型。
 - **多入口互通**：侧栏「灵感池」面板、终端 CLI（`fons`）、直接编辑 Markdown 收件箱三种方式同步生效。
-- **按会话隔离**：每个会话拥有独立收件箱、状态账本与归档，多任务并行互不干扰。
+- **按会话隔离**：每个会话拥有独立收件箱、附件仓、状态账本与归档，多任务并行互不干扰。
 
 ## 实机截图
 
@@ -68,11 +69,12 @@ flowchart LR
 - **`PreInvocation`**：将蓄水到期的条目和待发撤回合并注入下一次模型调用；无工作区会话仅在首次投递时附带极简 `[FONS_ACK: 编号]` 回执提示，后续投递只留 `[FONS]` 与真实条目。
 - **`Stop`**：读取模型回复末行的 `[FONS_ACK: ...]` 并自动回写 `【√】 `；若有漏处理或本轮末未暂缓的待投递条目，自动兜底续跑（最多 2 次）。
 
-有工作区会话的数据存放在目标工作区的 `.agents/fons/` 下，无工作区会话（No Project）存放在宿主数据目录 `<appData>/fons/no-workspace/` 下，均可直接在编辑器中按行编辑 `ideas-<conversationId>.md`（空行与 `#` 注释自动忽略）：
+有工作区会话的数据存放在目标工作区的 `.agents/fons/` 下，无工作区会话（No Project）存放在宿主数据目录 `<appData>/fons/no-workspace/` 下（附件按会话隔离在同级 `attachments/<conversationId>/` 中），均可直接在编辑器中按行编辑 `ideas-<conversationId>.md`（空行与 `#` 注释自动忽略）：
 
 ```markdown
 # 本轮补充灵感
-导出接口补充 created_at 字段
+- [ ] 导出接口补充 created_at 字段
+- [ ] 窄屏下按钮错位 [ui-bug.png](attachments/<conversationId>/ui-bug-a1b2c3d4.png)
 【√】 统一错误码映射表中的空值校验提示
 ```
 
@@ -124,7 +126,7 @@ Copy-Item -LiteralPath 'F:\Fons\ui-plugin' -Destination $globalUiPlugin -Recurse
 
 在 Antigravity 会话右侧点击 **+ → Extensions → 灵感池**：
 
-- 底部速记框按 **Enter** 入池，粘贴多行自动按非空行拆分，中文输入法选词时不误提交；
+- 底部速记框按 **Enter** 入池，支持 `Ctrl+V` 粘贴截图、拖拽文件入池（拖到待投递行可直接挂载到该行，也支持纯附件无文字直接入池），粘贴多行纯文本自动按非空行拆分，中文输入法选词时不误提交；
 - 顶栏可一键切换 **「↑ 水位 / → 水位」** 蓄水方向，或点击 **「归档」** 收拢已完成条目；
 - 面板自动绑定当前会话（支持已挂载 Fons 的项目工作区会话，以及启用全局 `fons-pool` 后的无工作区会话）。
 
@@ -133,12 +135,13 @@ Copy-Item -LiteralPath 'F:\Fons\ui-plugin' -Destination $globalUiPlugin -Recurse
 将 `bin/` 加入 `PATH`（或直接运行 `bin\fons.cmd`），在目标工作区或其子目录下使用（无工作区会话使用 `-n` / `--no-workspace` 或 `-s <sessionId>`）：
 
 ```powershell
-fons "导出接口补充 created_at 字段"   # 添加一条灵感
-fons list                             # 查看未完成条目与确认令牌
-fons done <token1> [token2...]        # 手动标记完成
-fons archive                          # 归档已完成条目
-fons -s <sessionId> list              # 多会话时显式指定会话 UUID
-fons --no-workspace "无工作区补充"     # 操作无工作区会话（简写 -n）
+fons "导出接口补充 created_at 字段"               # 添加一条灵感
+fons -a ./ui-bug.png "窄屏下按钮错位"             # 添加带截图/文件附件的灵感（支持多个 -a）
+fons list                                         # 查看未完成条目与确认令牌
+fons done <token1> [token2...]                    # 手动标记完成
+fons archive                                      # 归档已完成条目
+fons -s <sessionId> list                          # 多会话时显式指定会话 UUID
+fons --no-workspace "无工作区补充"                 # 操作无工作区会话（简写 -n）
 ```
 
 | 环境变量 | 默认值 | 说明 |
@@ -152,7 +155,7 @@ fons --no-workspace "无工作区补充"     # 操作无工作区会话（简写
 
 - 消抖到期在下一次模型调用时投递，不会主动唤醒空闲会话；本轮结束时 `Stop` Hook 会自动兜底未处于编辑暂缓中的条目。
 - 面板、CLI 与 Hook 对同一会话的写入会自动串行化；在外部编辑器直接修改 `ideas-<id>.md` 时请避开并发写入。
-- 宿主中删除会话后，对应 `ideas-<id>.md` 不会自动清理，可按需手动归档或删除。
+- 缓冲期删除条目或移除单个附件时会自动清理无引用的孤立附件；已完成条目归档时保留原附件并将链接重写为 `../attachments/...`，宿主中删除会话后对应文件可按需手动清理。
 
 <details>
 <summary>旧版单文件收件箱迁移说明</summary>
@@ -169,4 +172,4 @@ fons --no-workspace "无工作区补充"     # 操作无工作区会话（简写
 node --test
 ```
 
-后续规划（支持截图/文件附件、Codex 多宿主适配等）见 [ROADMAP.md](ROADMAP.md)。
+后续规划（Codex 多宿主适配等）见 [ROADMAP.md](ROADMAP.md)。

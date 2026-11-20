@@ -167,15 +167,16 @@
     .rows { display: flex; flex-direction: column; gap: 3px; }
     .row {
       position: relative;
-      display: flex;
-      align-items: flex-start;
-      gap: 8px;
+      display: grid;
+      grid-template-columns: 15px minmax(0, 1fr) auto auto;
+      column-gap: 8px;
+      align-items: start;
       padding: 6px 6px 6px 8px;
       border-radius: 8px;
       border: 1px solid transparent;
       min-width: 0;
       overflow: hidden;
-      transition: background-color 140ms ease, border-color 140ms ease;
+      transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
     }
     .row[data-status="buffering"] {
       border-color: color-mix(in srgb, var(--border) 62%, transparent);
@@ -188,6 +189,12 @@
     }
     .row[data-holding="true"] {
       border-color: color-mix(in srgb, var(--hold-tint) 42%, var(--border)) !important;
+    }
+    .row[data-drop-target="true"] {
+      border-style: dashed !important;
+      border-color: var(--primary) !important;
+      background: var(--accent-soft) !important;
+      box-shadow: 0 0 0 2px var(--accent-soft);
     }
     .row[data-fresh="true"] {
       animation: dropIn 180ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -232,11 +239,24 @@
 
     .row > input,
     .row > textarea,
+    .row > .row-attachments,
     .row > .row-timer,
     .row > .remove {
       position: relative;
       z-index: 1;
     }
+    .row > input[type="checkbox"] { grid-column: 1; grid-row: 1; }
+    .row > textarea { grid-column: 2; grid-row: 1; }
+    .row > .row-timer { grid-column: 3; grid-row: 1; }
+    .row > .remove { grid-column: 4; grid-row: 1; }
+    .row > .row-attachments { grid-column: 2 / -1; grid-row: 2; margin-top: 5px; }
+    .row[data-empty-note="true"]:not([data-status="buffering"]) > textarea { display: none; }
+    .row[data-empty-note="true"]:not([data-status="buffering"]) > .row-attachments {
+      grid-column: 2 / 4;
+      grid-row: 1;
+      margin-top: 0;
+    }
+    .row[data-status="done"] > .row-attachments { opacity: 0.72; }
 
     /* Tri-state Droplet & Optically Centered Checkmark */
     .row input[type="checkbox"] {
@@ -362,6 +382,174 @@
       background: color-mix(in srgb, var(--error) 12%, transparent);
     }
 
+    /* Attachment Previews & File Blocks (Chat-Input Style) */
+    .att-list,
+    .row-attachments,
+    .quick-drafts {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    .att-card {
+      position: relative;
+      border: 1px solid var(--border);
+      background: color-mix(in srgb, var(--muted) 38%, var(--background));
+      transition: border-color 140ms ease, background-color 140ms ease, transform 120ms ease;
+    }
+    .att-card:hover {
+      border-color: var(--accent-ring);
+    }
+    .att-card.is-missing {
+      border-style: dashed;
+      border-color: color-mix(in srgb, var(--error) 48%, var(--border));
+    }
+    .att-card.is-image {
+      width: 52px;
+      height: 52px;
+      border-radius: 8px;
+      overflow: hidden;
+      flex: none;
+      background:
+        linear-gradient(45deg, color-mix(in srgb, var(--muted) 42%, transparent) 25%, transparent 25%),
+        linear-gradient(-45deg, color-mix(in srgb, var(--muted) 42%, transparent) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, color-mix(in srgb, var(--muted) 42%, transparent) 75%),
+        linear-gradient(-45deg, transparent 75%, color-mix(in srgb, var(--muted) 42%, transparent) 75%);
+      background-size: 10px 10px;
+      background-position: 0 0, 0 5px, 5px -5px, -5px 0;
+    }
+    .row-attachments .att-card.is-image {
+      width: 40px;
+      height: 40px;
+      border-radius: 7px;
+    }
+    .att-thumb {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      cursor: zoom-in;
+    }
+    .att-placeholder {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--muted-foreground);
+      user-select: none;
+    }
+    .att-card.is-missing .att-placeholder {
+      color: var(--error);
+    }
+    .att-card.is-file {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      max-width: 196px;
+      min-width: 0;
+      height: 42px;
+      padding: 4px 8px 4px 6px;
+      border-radius: 8px;
+    }
+    .row-attachments .att-card.is-file {
+      height: 34px;
+      max-width: 184px;
+      padding: 3px 7px 3px 5px;
+      border-radius: 7px;
+      gap: 6px;
+    }
+    .att-badge {
+      width: 26px;
+      height: 26px;
+      border-radius: 6px;
+      flex: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--accent-soft);
+      color: var(--primary);
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      user-select: none;
+    }
+    .row-attachments .att-badge {
+      width: 22px;
+      height: 22px;
+      border-radius: 5px;
+      font-size: 9px;
+    }
+    .att-card.is-missing .att-badge {
+      background: color-mix(in srgb, var(--error) 14%, transparent);
+      color: var(--error);
+    }
+    .att-info {
+      min-width: 0;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+    .att-name {
+      font-size: 11.5px;
+      line-height: 1.25;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .row-attachments .att-name { font-size: 11px; }
+    .att-meta {
+      font-size: 10px;
+      line-height: 1.2;
+      color: var(--muted-foreground);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-variant-numeric: tabular-nums;
+    }
+    .att-card.is-missing .att-meta { color: var(--error); }
+    .att-remove {
+      width: 16px;
+      height: 16px;
+      flex: none;
+      padding: 0;
+      border-radius: 50%;
+      font-size: 12px;
+      line-height: 15px;
+      text-align: center;
+      transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease;
+    }
+    .att-card.is-image .att-remove {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      background: rgba(15, 23, 42, 0.74);
+      color: #fff;
+      opacity: 0;
+    }
+    .att-card.is-image:hover .att-remove,
+    .att-card.is-image .att-remove:focus-visible {
+      opacity: 1;
+    }
+    .att-card.is-image .att-remove:hover {
+      background: var(--error);
+    }
+    .att-card.is-file .att-remove {
+      color: var(--muted-foreground);
+      opacity: 0.68;
+      margin-left: 1px;
+    }
+    .att-card.is-file .att-remove:hover {
+      opacity: 1;
+      color: var(--error);
+      background: color-mix(in srgb, var(--error) 14%, transparent);
+    }
+
     /* Bottom Quick-Add Capsule */
     .quick-shell {
       padding: 6px 8px 9px;
@@ -369,7 +557,7 @@
     }
     .quick {
       display: flex;
-      align-items: flex-start;
+      flex-direction: column;
       gap: 7px;
       padding: 7px 9px;
       border-radius: 9px;
@@ -382,16 +570,42 @@
       border-color: var(--accent-ring);
       box-shadow: 0 0 0 2px var(--accent-soft);
     }
-    .quick-plus {
-      color: var(--muted-foreground);
-      font-size: 14px;
-      line-height: 20px;
-      user-select: none;
-      transition: color 150ms ease, transform 150ms ease;
+    .pool[data-dropping="true"] .quick {
+      background: var(--accent-soft);
+      border-style: dashed;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px var(--accent-soft);
     }
-    .quick:focus-within .quick-plus {
+    .quick-drafts {
+      padding-bottom: 5px;
+      border-bottom: 1px solid color-mix(in srgb, var(--border) 62%, transparent);
+    }
+    .quick-bar {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      min-width: 0;
+    }
+    .quick-attach {
+      width: 21px;
+      height: 21px;
+      flex: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      border-radius: 5px;
+      color: var(--muted-foreground);
+      transition: color 140ms ease, background-color 140ms ease, transform 120ms ease;
+    }
+    .quick-attach:not(:disabled):hover {
       color: var(--primary);
-      transform: scale(1.08);
+      background: var(--surface-active);
+    }
+    .quick-attach:not(:disabled):active { transform: scale(0.94); }
+    .quick-attach svg {
+      width: 14px;
+      height: 14px;
     }
     .quick textarea { flex: 1; min-width: 0; }
     .quick-enter {
@@ -404,11 +618,86 @@
       border: 1px solid var(--border);
       color: var(--muted-foreground);
       opacity: 0;
-      user-select: none;
-      pointer-events: none;
-      transition: opacity 140ms ease;
+      transition: opacity 140ms ease, color 140ms ease, border-color 140ms ease, background-color 140ms ease;
     }
-    .quick:focus-within .quick-enter { opacity: 0.65; }
+    .quick:focus-within .quick-enter,
+    .quick[data-has-draft="true"] .quick-enter {
+      opacity: 0.78;
+    }
+    .quick[data-has-draft="true"] .quick-enter:not(:disabled) {
+      color: var(--primary);
+      border-color: var(--accent-ring);
+      background: var(--accent-soft);
+    }
+    .quick-enter:not(:disabled):hover {
+      opacity: 1;
+      color: var(--primary);
+      border-color: var(--primary);
+    }
+
+    /* Drop Hint Banner & Image Lightbox */
+    .drop-banner {
+      position: absolute;
+      left: 12px;
+      right: 12px;
+      bottom: 54px;
+      z-index: 15;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 11.5px;
+      text-align: center;
+      pointer-events: none;
+      color: var(--primary);
+      background: color-mix(in srgb, var(--background) 88%, var(--primary) 12%);
+      border: 1px dashed var(--primary);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+    }
+    .lightbox {
+      position: absolute;
+      inset: 0;
+      z-index: 30;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 14px;
+      background: rgba(10, 14, 22, 0.82);
+      backdrop-filter: blur(4px);
+      animation: fadeSlide 140ms ease-out;
+    }
+    .lightbox-img {
+      max-width: 100%;
+      max-height: calc(100% - 34px);
+      object-fit: contain;
+      border-radius: 8px;
+      box-shadow: 0 8px 28px rgba(0, 0, 0, 0.38);
+    }
+    .lightbox-caption {
+      max-width: 100%;
+      padding: 2px 9px;
+      border-radius: 999px;
+      font-size: 11px;
+      color: #f8fafc;
+      background: rgba(15, 23, 42, 0.72);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .lightbox-close {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      font-size: 16px;
+      line-height: 22px;
+      text-align: center;
+      color: #f8fafc;
+      background: rgba(15, 23, 42, 0.68);
+    }
+    .lightbox-close:hover { background: var(--error); }
 
     @keyframes dropIn {
       from { opacity: 0; transform: translateY(5px); }
@@ -464,11 +753,25 @@
       <div class="rows"></div>
     </div>
     <div class="quick-shell">
-      <div class="quick">
-        <span class="quick-plus" aria-hidden="true">＋</span>
-        <textarea rows="1" data-testid="fons-quick-add" aria-label="记一条灵感" placeholder="记一条，回车入池…" disabled></textarea>
-        <span class="quick-enter" aria-hidden="true">↵</span>
+      <div class="quick" data-testid="fons-quick-box">
+        <div class="quick-drafts att-list" data-testid="fons-quick-drafts" hidden></div>
+        <div class="quick-bar">
+          <button type="button" class="quick-attach" data-testid="fons-attach" aria-label="添加附件" title="添加截图或参考文件（支持拖拽与 Ctrl+V 粘贴）" disabled>
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M13.2 7.55 7.65 13.1a3.6 3.6 0 0 1-5.1-5.1l5.8-5.8a2.35 2.35 0 0 1 3.32 3.33L5.95 11.25a1.1 1.1 0 0 1-1.56-1.55l5.1-5.1" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+          <input type="file" data-testid="fons-file-input" multiple hidden>
+          <textarea rows="1" data-testid="fons-quick-add" aria-label="记一条灵感" placeholder="记一条，回车入池（可粘贴截图或拖入文件）…" disabled></textarea>
+          <button type="button" class="quick-enter" data-testid="fons-quick-submit" aria-label="入池" title="回车入池" disabled>↵</button>
+        </div>
       </div>
+    </div>
+    <div class="drop-banner" data-testid="fons-drop-banner" hidden>松开添加附件到灵感池</div>
+    <div class="lightbox" data-testid="fons-lightbox" role="dialog" aria-label="图片预览" hidden>
+      <button type="button" class="lightbox-close" aria-label="关闭预览" title="关闭（Esc）">×</button>
+      <img class="lightbox-img" alt="">
+      <div class="lightbox-caption"></div>
     </div>
   </main>
   <script>
@@ -477,11 +780,19 @@
       const DEFAULT_DEBOUNCE_MS = 45000;
       const HOLD_RENEW_MS = 5000;
       const TYPING_QUIET_MS = 1200;
+      const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+      const MAX_ITEM_ATTACHMENTS = 8;
+      const IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif|svg)$/i;
+      const IMAGE_MIME_RE = /^image\/(?:png|jpeg|webp|gif|svg\+xml)$/i;
       const FLOW_STORAGE_KEY = 'fons.waterFlow';
       const nativeAutoSize = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('field-sizing', 'content');
       const $ = (selector) => document.querySelector(selector);
       const elements = {
         pool: $('.pool'), rows: $('.rows'), empty: $('.empty'), quick: $('[data-testid="fons-quick-add"]'),
+        quickBox: $('[data-testid="fons-quick-box"]'), quickDrafts: $('[data-testid="fons-quick-drafts"]'),
+        attach: $('[data-testid="fons-attach"]'), fileInput: $('[data-testid="fons-file-input"]'),
+        quickSubmit: $('[data-testid="fons-quick-submit"]'), dropBanner: $('[data-testid="fons-drop-banner"]'),
+        lightbox: $('[data-testid="fons-lightbox"]'),
         flowMode: $('[data-testid="fons-flow-mode"]'), archive: $('[data-testid="fons-archive"]'),
         warning: $('.warning'), notice: $('.notice'), count: $('.pool-count'),
       };
@@ -492,6 +803,9 @@
         composing: false, lastTypedAt: 0, flowMode: readSavedFlowMode(),
         loadedOnce: false, knownTokens: new Set(),
         workspace: null, workspaceKey: null, workspaceUris: [], boundWorkspaces: new Map(),
+        draftAttachments: [], draftSeq: 0, draftPrepTail: Promise.resolve(), draftPrepPending: 0,
+        submitAwaitingPrep: false, thumbUrls: new Map(), thumbInflight: new Map(),
+        revocableUrls: new Set(), dragDepth: 0, dropRow: null,
       };
       let noticeTimer;
       const conversationId = () => window.sidecar?.conversationId || '';
@@ -543,8 +857,71 @@
       }
 
       function updateAvailability() {
-        elements.quick.disabled = !state.registered;
-        if (!state.registered) elements.archive.disabled = true;
+        const disabled = !state.registered;
+        elements.quick.disabled = disabled;
+        if (elements.attach) elements.attach.disabled = disabled;
+        if (elements.quickSubmit) {
+          const canSend = !disabled && (
+            Boolean(elements.quick.value.trim()) ||
+            state.draftAttachments.length > 0 ||
+            state.draftPrepPending > 0
+          );
+          elements.quickSubmit.disabled = !canSend;
+        }
+        if (disabled) elements.archive.disabled = true;
+      }
+
+      function revokeManagedUrl(url) {
+        if (!url || !state.revocableUrls.has(url)) return;
+        state.revocableUrls.delete(url);
+        try { URL.revokeObjectURL?.(url); } catch {}
+      }
+
+      function clearAttachmentCaches() {
+        for (const draft of state.draftAttachments) revokeManagedUrl(draft.previewUrl);
+        state.draftAttachments = [];
+        state.draftPrepTail = Promise.resolve();
+        state.draftPrepPending = 0;
+        state.submitAwaitingPrep = false;
+        for (const url of state.revocableUrls) {
+          try { URL.revokeObjectURL?.(url); } catch {}
+        }
+        state.revocableUrls.clear();
+        state.thumbUrls.clear();
+        state.thumbInflight.clear();
+        renderDraftAttachments();
+      }
+
+      function clearDragVisuals() {
+        state.dragDepth = 0;
+        if (state.dropRow) {
+          delete state.dropRow.dataset.dropTarget;
+          state.dropRow = null;
+        }
+        if (elements.pool) delete elements.pool.dataset.dropping;
+        if (elements.dropBanner) elements.dropBanner.hidden = true;
+      }
+
+      function closeLightbox() {
+        if (!elements.lightbox) return;
+        elements.lightbox.hidden = true;
+        const img = elements.lightbox.querySelector?.('.lightbox-img');
+        if (img) img.src = '';
+      }
+
+      function openLightbox(url, label) {
+        if (!elements.lightbox || !url) return;
+        const img = elements.lightbox.querySelector?.('.lightbox-img');
+        const cap = elements.lightbox.querySelector?.('.lightbox-caption');
+        if (img) {
+          img.src = url;
+          img.alt = label || '';
+        }
+        if (cap) {
+          cap.textContent = label || '';
+          cap.hidden = !label;
+        }
+        elements.lightbox.hidden = false;
       }
 
       function showEmpty(message, kind = 'context') {
@@ -575,6 +952,9 @@
         state.loadedOnce = false;
         state.knownTokens = new Set();
         state.registered = false;
+        clearDragVisuals();
+        closeLightbox();
+        clearAttachmentCaches();
         elements.rows.replaceChildren();
         elements.quick.value = '';
         resize(elements.quick);
@@ -739,6 +1119,267 @@
         return '';
       }
 
+      function itemNote(item) {
+        return typeof item?.note === 'string' ? item.note : String(item?.text ?? '');
+      }
+
+      function itemAttachments(item) {
+        return Array.isArray(item?.attachments) ? item.attachments : [];
+      }
+
+      function formatBytes(bytes) {
+        const size = Number(bytes) || 0;
+        if (size < 1024) return `${size} B`;
+        if (size < 1024 * 1024) return `${(size / 1024).toFixed(size < 10240 ? 1 : 0)} KB`;
+        return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+      }
+
+      function fileBadgeLabel(name) {
+        const dot = String(name || '').lastIndexOf('.');
+        if (dot < 0 || dot === name.length - 1) return 'FILE';
+        const ext = name.slice(dot + 1).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        return ext ? ext.slice(0, 4) : 'FILE';
+      }
+
+      function bytesToBase64(bytes) {
+        if (typeof btoa === 'function') {
+          let binary = '';
+          const step = 0x8000;
+          for (let i = 0; i < bytes.length; i += step) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + step));
+          }
+          return btoa(binary);
+        }
+        if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
+        throw new Error('当前环境不支持 Base64 编码');
+      }
+
+      function base64ToPreviewUrl(dataBase64, mimeType) {
+        const type = mimeType || 'application/octet-stream';
+        if (typeof atob === 'function' && typeof Blob === 'function' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+          const bin = atob(dataBase64);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          const url = URL.createObjectURL(new Blob([bytes], { type }));
+          state.revocableUrls.add(url);
+          return url;
+        }
+        return `data:${type};base64,${dataBase64}`;
+      }
+
+      async function readClientFile(file, index) {
+        if (!file) return null;
+        const rawName = String(file.name || '').trim();
+        const mimeType = String(file.type || '').trim();
+        const extGuess = IMAGE_MIME_RE.test(mimeType)
+          ? `.${mimeType.split('/')[1].replace('jpeg', 'jpg').replace('svg+xml', 'svg')}`
+          : '';
+        const name = rawName || `paste-${index + 1}${extGuess || '.bin'}`;
+        if (typeof file.size === 'number' && file.size === 0) {
+          showNotice(`空文件已跳过：${name}`);
+          return null;
+        }
+        if (typeof file.size === 'number' && file.size > MAX_ATTACHMENT_BYTES) {
+          showNotice(`单个附件不能超过 10 MB：${name}`);
+          return null;
+        }
+        let dataBase64 = '';
+        let byteSize = Number(file.size) || 0;
+        if (typeof file.dataBase64 === 'string' && file.dataBase64) {
+          dataBase64 = file.dataBase64;
+          if (!byteSize) byteSize = Math.floor((dataBase64.length * 3) / 4);
+        } else if (typeof file.arrayBuffer === 'function') {
+          const buffer = await file.arrayBuffer();
+          const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+          byteSize = bytes.byteLength;
+          if (!byteSize) {
+            showNotice(`空文件已跳过：${name}`);
+            return null;
+          }
+          if (byteSize > MAX_ATTACHMENT_BYTES) {
+            showNotice(`单个附件不能超过 10 MB：${name}`);
+            return null;
+          }
+          dataBase64 = bytesToBase64(bytes);
+        } else {
+          showNotice(`无法读取文件：${name}`);
+          return null;
+        }
+        const isImage = IMAGE_MIME_RE.test(mimeType) || IMAGE_EXT_RE.test(name);
+        let previewUrl = '';
+        if (isImage) {
+          if (typeof Blob === 'function' && file instanceof Blob && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+            previewUrl = URL.createObjectURL(file);
+            state.revocableUrls.add(previewUrl);
+          } else {
+            previewUrl = `data:${mimeType || 'image/png'};base64,${dataBase64}`;
+          }
+        }
+        state.draftSeq += 1;
+        return {
+          key: `draft-${state.draftSeq}`,
+          name,
+          mimeType: mimeType || undefined,
+          size: byteSize,
+          isImage,
+          dataBase64,
+          previewUrl,
+        };
+      }
+
+      async function prepareClientFiles(fileList, currentCount) {
+        const rawFiles = Array.from(fileList || []).filter(Boolean);
+        if (!rawFiles.length) return [];
+        const slots = MAX_ITEM_ATTACHMENTS - currentCount;
+        if (slots <= 0) {
+          showNotice(`单条灵感最多添加 ${MAX_ITEM_ATTACHMENTS} 个附件`);
+          return [];
+        }
+        if (rawFiles.length > slots) {
+          showNotice(`单条灵感最多添加 ${MAX_ITEM_ATTACHMENTS} 个附件，已截取前 ${slots} 个`);
+        }
+        const selected = rawFiles.slice(0, slots);
+        const prepared = [];
+        for (let i = 0; i < selected.length; i++) {
+          const entry = await readClientFile(selected[i], i);
+          if (entry) prepared.push(entry);
+        }
+        return prepared;
+      }
+
+      function ensureThumbnailUrl(storedName) {
+        if (state.thumbUrls.has(storedName)) return Promise.resolve(state.thumbUrls.get(storedName));
+        if (state.thumbInflight.has(storedName)) return state.thumbInflight.get(storedName);
+        const id = state.id;
+        const session = state.session;
+        const task = request('/api/pool/attachment', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversationId: id, workspaceUris: state.workspaceUris, storedName }),
+        }).then((data) => {
+          if (state.id !== id || state.session !== session || !data?.dataBase64) return '';
+          const url = base64ToPreviewUrl(data.dataBase64, data.mimeType);
+          state.thumbUrls.set(storedName, url);
+          return url;
+        }).catch(() => '').finally(() => {
+          if (state.thumbInflight.get(storedName) === task) state.thumbInflight.delete(storedName);
+        });
+        state.thumbInflight.set(storedName, task);
+        return task;
+      }
+
+      function createAttachmentCard(att, { removable, onRemove }) {
+        const card = document.createElement('div');
+        const missing = Boolean(att.missing);
+        card.className = `att-card ${att.isImage ? 'is-image' : 'is-file'}${missing ? ' is-missing' : ''}`;
+        card.dataset.testid = att.isImage ? 'fons-att-image' : 'fons-att-file';
+        card.dataset.name = att.name;
+        const sizeLabel = missing ? '文件缺失' : formatBytes(att.size);
+        const fullTitle = `${att.name} · ${sizeLabel}`;
+        card.setAttribute('title', fullTitle);
+        if (att.isImage) {
+          if (missing) {
+            const broken = document.createElement('span');
+            broken.className = 'att-placeholder';
+            broken.textContent = '缺失';
+            card.append(broken);
+          } else {
+            const img = document.createElement('img');
+            img.className = 'att-thumb';
+            img.alt = att.name;
+            const cached = att.previewUrl || state.thumbUrls.get(att.storedName) || '';
+            if (cached) {
+              img.src = cached;
+            } else if (att.storedName) {
+              void ensureThumbnailUrl(att.storedName).then((url) => {
+                if (url && card.isConnected !== false) img.src = url;
+              });
+            }
+            img.addEventListener('click', () => {
+              const src = img.src || att.previewUrl || state.thumbUrls.get(att.storedName);
+              if (src) openLightbox(src, fullTitle);
+            });
+            card.append(img);
+          }
+        } else {
+          const badge = document.createElement('span');
+          badge.className = 'att-badge';
+          badge.textContent = fileBadgeLabel(att.name);
+          const info = document.createElement('span');
+          info.className = 'att-info';
+          const nameEl = document.createElement('span');
+          nameEl.className = 'att-name';
+          nameEl.textContent = att.name;
+          const metaEl = document.createElement('span');
+          metaEl.className = 'att-meta';
+          metaEl.textContent = `${fileBadgeLabel(att.name)} · ${sizeLabel}`;
+          info.append(nameEl, metaEl);
+          card.append(badge, info);
+        }
+        if (removable) {
+          const removeBtn = document.createElement('button');
+          removeBtn.type = 'button';
+          removeBtn.className = 'att-remove';
+          removeBtn.dataset.testid = 'fons-att-remove';
+          removeBtn.textContent = '×';
+          removeBtn.setAttribute('aria-label', `移除附件 ${att.name}`);
+          removeBtn.setAttribute('title', `移除 ${att.name}`);
+          removeBtn.addEventListener('click', (event) => {
+            event.stopPropagation?.();
+            onRemove();
+          });
+          card.append(removeBtn);
+        }
+        return card;
+      }
+
+      function renderDraftAttachments() {
+        const drafts = state.draftAttachments;
+        if (elements.quickBox) {
+          if (drafts.length) elements.quickBox.dataset.hasDraft = 'true';
+          else delete elements.quickBox.dataset.hasDraft;
+        }
+        updateAvailability();
+        if (!elements.quickDrafts) return;
+        if (!drafts.length) {
+          elements.quickDrafts.replaceChildren();
+          elements.quickDrafts.hidden = true;
+          return;
+        }
+        elements.quickDrafts.hidden = false;
+        const cards = drafts.map((draft) => createAttachmentCard(draft, {
+          removable: true,
+          onRemove: () => {
+            const idx = state.draftAttachments.indexOf(draft);
+            if (idx >= 0) state.draftAttachments.splice(idx, 1);
+            revokeManagedUrl(draft.previewUrl);
+            renderDraftAttachments();
+          },
+        }));
+        elements.quickDrafts.replaceChildren(...cards);
+      }
+
+      function renderRowAttachments(node, item) {
+        const container = node.querySelector('.row-attachments');
+        if (!container) return;
+        const atts = itemAttachments(item);
+        const editable = item.status === 'buffering';
+        const sig = atts.map((a) => `${a.storedName}:${a.name}:${a.size}:${a.missing ? 1 : 0}:${editable ? 1 : 0}`).join('|');
+        if (node.attSig === sig) return;
+        node.attSig = sig;
+        if (!atts.length) {
+          container.replaceChildren();
+          container.hidden = true;
+          return;
+        }
+        container.hidden = false;
+        const cards = atts.map((att) => createAttachmentCard(att, {
+          removable: editable,
+          onRemove: () => { void removeRowAttachment(node, att.storedName); },
+        }));
+        container.replaceChildren(...cards);
+      }
+
       function syncRowTiming(node, item) {
         if (item.status !== 'buffering') {
           node.deadline = 0;
@@ -759,6 +1400,10 @@
         node.dataset.token = item.token;
         node.dataset.status = item.status;
         const editable = item.status === 'buffering';
+        const note = itemNote(item);
+        const atts = itemAttachments(item);
+        if (!note && atts.length) node.dataset.emptyNote = 'true';
+        else delete node.dataset.emptyNote;
         const check = node.querySelector('input');
         check.checked = item.status === 'done';
         check.setAttribute('title', checkTooltip(item.status));
@@ -766,14 +1411,16 @@
         const input = node.querySelector('textarea');
         input.readOnly = !editable;
         input.setAttribute('title', inputTooltip(item.status));
+        input.setAttribute('placeholder', editable && atts.length ? '添加说明（可选）…' : '');
         if (!editable) {
           node.focused = false;
           node.dirty = false;
         }
         if (!editable || (document.activeElement !== input && !node.focused && !node.dirty && !node.saving)) {
-          input.value = item.text;
+          input.value = note;
           resize(input);
         }
+        renderRowAttachments(node, item);
         syncRowTiming(node, item);
       }
 
@@ -902,17 +1549,112 @@
         if (node.saving) return Promise.resolve(node.saving);
         if (!validNode(node) || node.item.status !== 'buffering') return Promise.resolve({ conflict: false });
         const value = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
-        if (value === node.item.text) { node.dirty = false; return Promise.resolve({ conflict: false }); }
-        if (!value) { showNotice('灵感内容不能为空'); return Promise.resolve(null); }
+        const atts = itemAttachments(node.item);
+        if (value === itemNote(node.item)) { node.dirty = false; return Promise.resolve({ conflict: false }); }
+        if (!value && !atts.length) { showNotice('灵感内容不能为空'); return Promise.resolve(null); }
         const id = node.conversation;
         const previousItemId = node.item.id;
-        const fields = () => (validNode(node) ? { ...itemArguments(node), newText: value } : null);
+        const fields = () => {
+          if (!validNode(node)) return null;
+          const currentAtts = itemAttachments(node.item);
+          return currentAtts.length
+            ? { ...itemArguments(node), newText: value, keepAttachments: currentAtts.map((a) => a.storedName) }
+            : { ...itemArguments(node), newText: value };
+        };
         node.saving = mutate('update', fields, id, (result) => applySavedRow(node, value, previousItemId, result)).then((result) => {
           node.saving = null;
           if (shouldResaveRow(node, result)) queueMicrotask(() => { void saveRow(node); });
           return result;
         });
         return node.saving;
+      }
+
+      async function removeRowAttachment(node, storedName) {
+        if (node.removing || !validNode(node) || node.item.status !== 'buffering') return;
+        if (node.saving) {
+          const saved = await node.saving;
+          if (!saved || saved.conflict || !validNode(node)) return;
+        }
+        const remaining = itemAttachments(node.item)
+          .filter((att) => att.storedName !== storedName)
+          .map((att) => att.storedName);
+        const currentNote = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
+        if (!remaining.length && !currentNote) {
+          await deleteRow(node);
+          return;
+        }
+        const id = node.conversation;
+        const previousItemId = node.item.id;
+        node.saving = mutate('update', () => (
+          validNode(node)
+            ? { ...itemArguments(node), newText: currentNote, keepAttachments: remaining }
+            : null
+        ), id, (result) => applySavedRow(node, currentNote, previousItemId, result)).finally(() => {
+          node.saving = null;
+        });
+        await node.saving;
+        syncHold();
+      }
+
+      async function attachFilesToRow(node, fileList) {
+        const rawFiles = Array.from(fileList || []).filter(Boolean);
+        if (!rawFiles.length || node.removing || !validNode(node) || node.item.status !== 'buffering') return;
+        if (node.saving) {
+          const saved = await node.saving;
+          if (!saved || saved.conflict || !validNode(node) || node.item.status !== 'buffering') return;
+        }
+        const existing = itemAttachments(node.item);
+        const prepared = await prepareClientFiles(rawFiles, existing.length);
+        for (const item of prepared) revokeManagedUrl(item.previewUrl);
+        if (!prepared.length || !validNode(node) || node.item.status !== 'buffering') return;
+        const newAttachments = prepared.map(({ name, mimeType, dataBase64 }) => ({ name, mimeType, dataBase64 }));
+        const id = node.conversation;
+        let sentNote = '';
+        let previousItemId = node.item.id;
+        node.saving = mutate('update', () => {
+          if (!validNode(node) || node.item.status !== 'buffering') return null;
+          sentNote = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
+          previousItemId = node.item.id;
+          return {
+            ...itemArguments(node),
+            newText: sentNote,
+            keepAttachments: itemAttachments(node.item).map((a) => a.storedName),
+            newAttachments,
+          };
+        }, id, (result) => applySavedRow(node, sentNote, previousItemId, result)).finally(() => {
+          node.saving = null;
+        });
+        await node.saving;
+        syncHold();
+      }
+
+      function enqueueDraftFiles(fileList) {
+        syncSession();
+        const rawFiles = Array.from(fileList || []).filter(Boolean);
+        if (!state.registered || !rawFiles.length) return state.draftPrepTail;
+        const id = state.id;
+        const session = state.session;
+        state.draftPrepPending += 1;
+        updateAvailability();
+        const next = state.draftPrepTail.then(async () => {
+          if (state.id !== id || state.session !== session || !state.registered) return;
+          const prepared = await prepareClientFiles(rawFiles, state.draftAttachments.length);
+          if (!prepared.length) return;
+          if (state.id !== id || state.session !== session || !state.registered) {
+            for (const item of prepared) revokeManagedUrl(item.previewUrl);
+            return;
+          }
+          state.draftAttachments.push(...prepared);
+          renderDraftAttachments();
+          elements.quick.focus?.();
+        }).finally(() => {
+          if (state.id === id && state.session === session) {
+            state.draftPrepPending = Math.max(0, state.draftPrepPending - 1);
+            updateAvailability();
+          }
+        });
+        state.draftPrepTail = next.catch(() => {});
+        return next;
       }
 
       function restoreCheck(node) {
@@ -977,9 +1719,29 @@
         });
       }
 
+      function extractClipboardFiles(clipboardData) {
+        if (!clipboardData) return [];
+        if (clipboardData.files && clipboardData.files.length) return Array.from(clipboardData.files);
+        if (!clipboardData.items) return [];
+        const files = [];
+        for (const item of Array.from(clipboardData.items)) {
+          if (item?.kind === 'file' && typeof item.getAsFile === 'function') {
+            const file = item.getAsFile();
+            if (file) files.push(file);
+          }
+        }
+        return files;
+      }
+
       function pasteSingleLine(event, node) {
         if (node.item.status !== 'buffering') return;
-        const text = event.clipboardData.getData('text');
+        const files = extractClipboardFiles(event.clipboardData);
+        if (files.length) {
+          event.preventDefault();
+          void attachFilesToRow(node, files);
+          return;
+        }
+        const text = event.clipboardData?.getData?.('text') || '';
         if (!/[\r\n]/.test(text)) return;
         event.preventDefault();
         const input = event.currentTarget;
@@ -1054,6 +1816,9 @@
         input.rows = 1;
         input.dataset.testid = 'fons-input';
         input.setAttribute('aria-label', '灵感内容');
+        const attWrap = document.createElement('div');
+        attWrap.className = 'row-attachments';
+        attWrap.hidden = true;
         const timer = document.createElement('span');
         timer.className = 'row-timer';
         timer.setAttribute('aria-hidden', 'true');
@@ -1065,7 +1830,7 @@
         remove.textContent = '×';
         remove.setAttribute('aria-label', '删除灵感');
         remove.setAttribute('title', '删除灵感');
-        node.append(water, check, input, timer, status, remove);
+        node.append(water, check, input, attWrap, timer, status, remove);
         check.addEventListener('change', () => { void changeCheck(node); });
         input.addEventListener('compositionstart', () => { state.composing = true; });
         input.addEventListener('compositionend', () => { state.composing = false; state.lastTypedAt = Date.now(); });
@@ -1099,11 +1864,12 @@
       }
 
       function refreshActiveRow(node, item) {
-        if (node.refreshValue !== item.text && node.item.text !== item.text && !node.conflicted && item.status === 'buffering') return;
+        const nextNote = itemNote(item);
+        if (node.refreshValue !== nextNote && itemNote(node.item) !== nextNote && !node.conflicted && item.status === 'buffering') return;
         updateRow(node, item);
         if (node.conflicted || item.status !== 'buffering') {
           const input = node.querySelector('textarea');
-          input.value = item.text;
+          input.value = nextNote;
           node.dirty = false;
           resize(input);
         }
@@ -1261,17 +2027,95 @@
         syncSession();
         const id = state.id;
         const session = state.session;
-        if (!texts.length || !state.registered) return;
+        const drafts = state.draftAttachments.slice();
+        if ((!texts.length && !drafts.length) || !state.registered) return;
         state.lastTypedAt = 0;
         elements.quick.value = '';
         resize(elements.quick);
-        const result = await mutate('add', { texts }, id);
-        if (session !== state.session || id !== conversationId()) return;
+        if (drafts.length) {
+          state.draftAttachments = [];
+          renderDraftAttachments();
+        } else {
+          updateAvailability();
+        }
+        const payload = drafts.length
+          ? {
+              texts: expectedValue.replace(/[\r\n]+/g, ' ').trim() ? [expectedValue.replace(/[\r\n]+/g, ' ').trim()] : [],
+              attachments: drafts.map(({ name, mimeType, dataBase64 }) => ({ name, mimeType, dataBase64 })),
+            }
+          : { texts };
+        const result = await mutate('add', payload, id);
+        if (session !== state.session || id !== conversationId()) {
+          for (const draft of drafts) revokeManagedUrl(draft.previewUrl);
+          return;
+        }
         if (!result) {
           elements.quick.value = [expectedValue, elements.quick.value].filter(Boolean).join('\n');
           resize(elements.quick);
-        } else if (result.count > 1) {
+          if (drafts.length) {
+            state.draftAttachments = [...drafts, ...state.draftAttachments];
+            renderDraftAttachments();
+          } else {
+            updateAvailability();
+          }
+          return;
+        }
+        for (const draft of drafts) revokeManagedUrl(draft.previewUrl);
+        if (result.count > 1) {
           showNotice(`已拆入 ${result.count} 条灵感`);
+        }
+      }
+
+      async function submitQuickInput() {
+        syncSession();
+        if (!state.registered) return;
+        if (state.draftPrepPending > 0) {
+          if (state.submitAwaitingPrep) return;
+          const id = state.id;
+          const session = state.session;
+          state.submitAwaitingPrep = true;
+          try {
+            await state.draftPrepTail;
+          } finally {
+            if (state.id === id && state.session === session) state.submitAwaitingPrep = false;
+          }
+          syncSession();
+          if (state.id !== id || state.session !== session || !state.registered) return;
+        }
+        const value = elements.quick.value;
+        const lines = value.split(/\r?\n/).map((text) => text.trim()).filter(Boolean);
+        void addTexts(lines, value);
+      }
+
+      function hasDraggedFiles(event) {
+        const types = event?.dataTransfer?.types;
+        if (!types) return false;
+        return typeof types.includes === 'function' ? types.includes('Files') : Array.from(types).includes('Files');
+      }
+
+      function resolveBufferingDropRow(target) {
+        const row = target?.closest?.('.row');
+        return row && row.item?.status === 'buffering' && !row.removing ? row : null;
+      }
+
+      function updateDropHover(targetRow) {
+        if (state.dropRow && state.dropRow !== targetRow) {
+          delete state.dropRow.dataset.dropTarget;
+        }
+        state.dropRow = targetRow;
+        if (targetRow) {
+          targetRow.dataset.dropTarget = 'true';
+          if (elements.pool) delete elements.pool.dataset.dropping;
+          if (elements.dropBanner) {
+            elements.dropBanner.textContent = '松开将附件添加到此条灵感';
+            elements.dropBanner.hidden = false;
+          }
+        } else {
+          if (elements.pool) elements.pool.dataset.dropping = 'true';
+          if (elements.dropBanner) {
+            elements.dropBanner.textContent = '松开添加附件到灵感池';
+            elements.dropBanner.hidden = false;
+          }
         }
       }
 
@@ -1280,22 +2124,93 @@
       elements.quick.addEventListener('input', () => {
         state.lastTypedAt = Date.now();
         resize(elements.quick);
+        updateAvailability();
       });
       elements.quick.addEventListener('keydown', (event) => {
         if (event.isComposing || event.keyCode === 229 || event.key !== 'Enter') return;
         event.preventDefault();
-        const value = elements.quick.value;
-        void addTexts(value.split(/\r?\n/).map((text) => text.trim()).filter(Boolean), value);
+        void submitQuickInput();
       });
       elements.quick.addEventListener('paste', (event) => {
-        const text = event.clipboardData.getData('text');
+        const files = extractClipboardFiles(event.clipboardData);
+        if (files.length) {
+          event.preventDefault();
+          void enqueueDraftFiles(files);
+          return;
+        }
+        const text = event.clipboardData?.getData?.('text') || '';
         if (!/[\r\n]/.test(text)) return;
         event.preventDefault();
         const input = elements.quick;
+        if (state.draftAttachments.length || state.draftPrepPending > 0) {
+          input.setRangeText(text.replace(/[\r\n]+/g, ' '), input.selectionStart, input.selectionEnd, 'end');
+          state.lastTypedAt = Date.now();
+          resize(input);
+          updateAvailability();
+          return;
+        }
         input.setRangeText(text, input.selectionStart, input.selectionEnd, 'end');
         const value = input.value;
         resize(input);
         void addTexts(value.split(/\r\n|\r|\n/).map((line) => line.trim()).filter(Boolean), value);
+      });
+      if (elements.attach && elements.fileInput) {
+        elements.attach.addEventListener('click', () => {
+          if (!state.registered) return;
+          elements.fileInput.value = '';
+          elements.fileInput.click?.();
+        });
+        elements.fileInput.addEventListener('change', () => {
+          const files = Array.from(elements.fileInput.files || []);
+          elements.fileInput.value = '';
+          if (files.length) void enqueueDraftFiles(files);
+        });
+      }
+      if (elements.quickSubmit) {
+        elements.quickSubmit.addEventListener('click', () => {
+          if (state.registered) void submitQuickInput();
+        });
+      }
+      if (elements.pool) {
+        elements.pool.addEventListener('dragenter', (event) => {
+          if (!state.registered || !hasDraggedFiles(event)) return;
+          event.preventDefault?.();
+          state.dragDepth += 1;
+          updateDropHover(resolveBufferingDropRow(event.target));
+        });
+        elements.pool.addEventListener('dragover', (event) => {
+          if (!state.registered || !hasDraggedFiles(event)) return;
+          event.preventDefault?.();
+          if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+          updateDropHover(resolveBufferingDropRow(event.target));
+        });
+        elements.pool.addEventListener('dragleave', (event) => {
+          if (!state.dragDepth) return;
+          state.dragDepth = Math.max(0, state.dragDepth - 1);
+          if (state.dragDepth === 0 || !event.relatedTarget) clearDragVisuals();
+        });
+        elements.pool.addEventListener('drop', (event) => {
+          if (!state.registered || !hasDraggedFiles(event)) return;
+          event.preventDefault?.();
+          const targetRow = resolveBufferingDropRow(event.target);
+          clearDragVisuals();
+          const files = Array.from(event.dataTransfer?.files || []);
+          if (!files.length) return;
+          if (targetRow) void attachFilesToRow(targetRow, files);
+          else void enqueueDraftFiles(files);
+        });
+      }
+      if (elements.lightbox) {
+        elements.lightbox.addEventListener('click', (event) => {
+          const img = elements.lightbox.querySelector?.('.lightbox-img');
+          if (event.target !== img) closeLightbox();
+        });
+      }
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && elements.lightbox && !elements.lightbox.hidden) {
+          event.preventDefault?.();
+          closeLightbox();
+        }
       });
       if (elements.flowMode) {
         elements.flowMode.addEventListener('click', () => {

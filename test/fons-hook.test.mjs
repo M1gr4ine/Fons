@@ -1277,3 +1277,76 @@ test('per-item 45s debounce and single-item hold defer only the held item in Pre
   const secondDelivery = runHook(pre).injectSteps[0].systemMessage.systemMessage;
   assert.match(secondDelivery, /heldItem/);
 });
+
+test('Hook injects normalized attachment paths for workspace and no-workspace sessions and preserves links on ACK', (t) => {
+  const ws = makeTempDir(t, HOOK_A);
+  const ctx = { rootDir: ws, sessionId: HOOK_A };
+  store.addIdeas({
+    ...ctx,
+    texts: ['修复对齐偏差'],
+    attachments: [{ name: 'align.png', mimeType: 'image/png', buffer: Buffer.from('png-data') }],
+  });
+  store.addIdeas({
+    ...ctx,
+    texts: [],
+    attachments: [{ name: 'only-shot.png', mimeType: 'image/png', buffer: Buffer.from('png-2') }],
+  });
+
+  const preMsg = runHook(
+    { hookEventName: 'PreInvocation', cwd: ws, conversationId: HOOK_A },
+    { FONS_DEBOUNCE_SEC: '0' },
+  ).injectSteps[0].systemMessage.systemMessage;
+
+  const snap = store.readPoolSnapshot(ctx);
+  const expectedFirstPath = path.join(ws, '.agents', 'fons', 'attachments', HOOK_A, snap.items[0].attachments[0].storedName).replace(/\\/g, '/');
+  const expectedSecondPath = path.join(ws, '.agents', 'fons', 'attachments', HOOK_A, snap.items[1].attachments[0].storedName).replace(/\\/g, '/');
+  assert.ok(preMsg.includes(`1. 修复对齐偏差（附件: ${expectedFirstPath}）`), preMsg);
+  assert.ok(preMsg.includes(`2. 请结合附件处理（附件: ${expectedSecondPath}）`), preMsg);
+
+  const tokens = [...preMsg.matchAll(/\[FONS:([a-f0-9]{8})\]/g)].map((m) => m[1]);
+  assert.equal(tokens.length, 2);
+
+  // Settle first via ACK, retract second and verify readable retraction notice
+  store.removeIdea({ ...ctx, rowIndex: snap.items[1].rowIndex, expectedRaw: snap.items[1].raw });
+  const transcriptPath = writeTranscript(ws, 'att-ack.jsonl', [userStep, answer(`已修复\n[FONS_ACK: ${tokens[0]}]`)]);
+  assert.deepEqual(runStop(ws, HOOK_A, { transcriptPath }), { decision: 'allow' });
+
+  const afterAck = store.readPoolSnapshot(ctx);
+  assert.equal(afterAck.items.length, 1);
+  assert.equal(afterAck.items[0].status, 'done');
+  assert.equal(afterAck.items[0].note, '修复对齐偏差');
+  assert.equal(afterAck.items[0].attachments[0].name, 'align.png');
+
+  const retractMsg = runHook(
+    { hookEventName: 'PreInvocation', cwd: ws, conversationId: HOOK_A },
+    { FONS_DEBOUNCE_SEC: '0' },
+  ).injectSteps[0].systemMessage.systemMessage;
+  assert.match(retractMsg, /\[FONS 撤回\][\s\S]*\[附件: only-shot\.png\]/);
+
+  // No-workspace session mirrors delivered attachments into artifactDirectoryPath/fons-attachments
+  const appData = path.join(ws, 'host-appdata');
+  const artifactDirectoryPath = path.join(appData, 'brain', HOOK_B);
+  const noWsDir = store.noWorkspaceFonsDir(appData);
+  store.addIdeas({
+    fonsDir: noWsDir,
+    sessionId: HOOK_B,
+    texts: ['查看无工作区截图'],
+    attachments: [{ name: 'nows.png', mimeType: 'image/png', buffer: Buffer.from('nows-img') }],
+  });
+  const noWsMsg = runHook(
+    {
+      hookEventName: 'PreInvocation',
+      conversationId: HOOK_B,
+      workspacePaths: [],
+      artifactDirectoryPath,
+      transcriptPath: path.join(artifactDirectoryPath, '.system_generated', 'logs', 'transcript.jsonl'),
+    },
+    { FONS_DEBOUNCE_SEC: '0' },
+    ['--scope=no-workspace'],
+  ).injectSteps[0].systemMessage.systemMessage;
+
+  const noWsSnap = store.readPoolSnapshot({ fonsDir: noWsDir, sessionId: HOOK_B });
+  const mirrored = path.join(artifactDirectoryPath, 'fons-attachments', noWsSnap.items[0].attachments[0].storedName);
+  assert.equal(fs.existsSync(mirrored), true);
+  assert.ok(noWsMsg.includes(mirrored.replace(/\\/g, '/')), noWsMsg);
+});

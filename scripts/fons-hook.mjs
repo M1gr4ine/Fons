@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { splitIdeaText } from "./fons-inbox.mjs";
 import {
   completeAcknowledgedIdeas, computeDebounce, findAppData, isValidSessionId, migrateLegacyInbox,
   noWorkspaceFonsDir, readJson, readPoolData, registerConversation, sessionPaths, withPoolWrite,
@@ -78,14 +79,49 @@ function readTurnAcknowledgments(transcriptPath) {
   return tokens;
 }
 
-function markDelivered(items, { state, ui }) {
+function toSlashPath(filePath) {
+  return path.resolve(filePath).replace(/\\/g, "/");
+}
+
+function resolveDeliveredAttachmentPath(storedName, data, context) {
+  const sourcePath = path.join(data.paths.attachmentsDir, storedName);
+  if (context.scope === "no-workspace" && context.artifactDir && fs.existsSync(sourcePath)) {
+    const mirrorDir = path.join(context.artifactDir, "fons-attachments");
+    const mirrorPath = path.join(mirrorDir, storedName);
+    if (!fs.existsSync(mirrorPath)) {
+      fs.mkdirSync(mirrorDir, { recursive: true });
+      try {
+        fs.linkSync(sourcePath, mirrorPath);
+      } catch (err) {
+        if (!["EXDEV", "EPERM", "EACCES", "ENOSYS"].includes(err?.code)) throw err;
+        fs.copyFileSync(sourcePath, mirrorPath);
+      }
+    }
+    return toSlashPath(mirrorPath);
+  }
+  return toSlashPath(sourcePath);
+}
+
+function formatDeliveredLine(text, data, context, withdrawn) {
+  const { note, attachments } = splitIdeaText(text, context.sessionId);
+  if (!attachments.length) {
+    return withdrawn ? `${text}（重新添加）` : text;
+  }
+  const resolved = attachments.map((att) => resolveDeliveredAttachmentPath(att.storedName, data, context));
+  const base = note || "请结合附件处理";
+  const head = withdrawn ? `${base}（重新添加）` : base;
+  return `${head}（附件: ${resolved.join(", ")}）`;
+}
+
+function markDelivered(items, data, context) {
+  const { state, ui } = data;
   state.delivered ??= {};
   return items.map(({ id, text }, index) => {
     const ackToken = crypto.randomBytes(4).toString("hex");
     const withdrawn = ui.retracted?.[id];
     const deliveredAt = Math.max(Date.now(), (ui.reopened?.[id] ?? 0) + 1, (withdrawn?.ts ?? 0) + 1);
     state.delivered[id] = { text, deliveredAt, ackToken };
-    const label = withdrawn ? `${text}（重新添加）` : text;
+    const label = formatDeliveredLine(text, data, context, withdrawn);
     return `${index + 1}. ${label} [FONS:${ackToken}]`;
   }).join("\n");
 }
@@ -94,13 +130,20 @@ function unnotified(ui, state) {
   return Object.entries(ui.retracted ?? {}).filter(([id, entry]) => (state.retractNotified?.[id] ?? -1) < entry.ts);
 }
 
-function collectRetractions({ state, ui }) {
+function formatRetractedLine(text, sessionId) {
+  const { note, attachments } = splitIdeaText(text, sessionId);
+  if (!attachments.length) return text;
+  const names = attachments.map((att) => att.name).join(", ");
+  return note ? `${note}（附件: ${names}）` : `[附件: ${names}]`;
+}
+
+function collectRetractions({ state, ui }, sessionId) {
   const retracted = unnotified(ui, state);
   if (!retracted.length) return "";
   state.retractNotified ??= {};
   for (const [id, entry] of retracted) state.retractNotified[id] = entry.ts;
   return "[FONS 撤回] 用户已撤回以下补充，若尚未执行请跳过：\n" +
-    retracted.map(([, entry]) => entry.text).join("\n");
+    retracted.map(([, entry]) => formatRetractedLine(entry.text, sessionId)).join("\n");
 }
 
 function clearRetractionMarker({ paths, state }) {
@@ -127,7 +170,7 @@ function handlePreInvocation(data, context) {
   const deliveredIds = new Set();
   const messages = [];
   if (ready.length) {
-    const numbered = markDelivered(ready, data);
+    const numbered = markDelivered(ready, data, context);
     for (const item of ready) deliveredIds.add(item.id);
     const sendHint = context.scope === "no-workspace" && !state.ackHintSent;
     if (sendHint) state.ackHintSent = true;
@@ -135,7 +178,7 @@ function handlePreInvocation(data, context) {
     messages.push(header + "\n" + numbered);
   }
   syncPendingLedger(state, pendingAt, deliveredIds);
-  const retracted = collectRetractions(data);
+  const retracted = collectRetractions(data, context.sessionId);
   if (retracted) messages.unshift(retracted);
   if (!messages.length) return {};
   return { injectSteps: [{ systemMessage: { systemMessage: messages.join("\n\n") } }] };
@@ -184,15 +227,21 @@ function handleStop(input, data, tokens, context) {
   state.lastStopSig = signature;
   state.stopCount = count + 1;
   if (context.scope === "no-workspace") state.ackHintSent = true;
-  const numbered = markDelivered(remaining, data);
+  const numbered = markDelivered(remaining, data, context);
   syncPendingLedger(state, timing.pendingAt, new Set(remaining.map((item) => item.id)));
   const reminder = "[FONS 收尾核对] 以下补充待处理（完成后在回复末行附 [FONS_ACK: 编号]）：\n" + numbered;
-  const reason = [collectRetractions(data), reminder].filter(Boolean).join("\n\n");
+  const reason = [collectRetractions(data, context.sessionId), reminder].filter(Boolean).join("\n\n");
   return { decision: "continue", reason };
 }
 
 function resolveAppData(input) {
   return findAppData(input.transcriptPath, "brain") || findAppData(input.artifactDirectoryPath, "brain");
+}
+
+function resolveArtifactDir(input) {
+  return typeof input.artifactDirectoryPath === "string" && input.artifactDirectoryPath.trim()
+    ? path.resolve(input.artifactDirectoryPath)
+    : null;
 }
 
 function parseScope(argv) {
@@ -210,6 +259,7 @@ function parseScope(argv) {
 
 function resolveHookContext(input, scopeMode) {
   if (!isValidSessionId(input.conversationId)) return null;
+  const artifactDir = resolveArtifactDir(input);
   const isNoWorkspace = Array.isArray(input.workspacePaths) ? input.workspacePaths.length === 0 : !input.cwd;
   if (isNoWorkspace) {
     if (scopeMode === "workspace") return null;
@@ -220,6 +270,7 @@ function resolveHookContext(input, scopeMode) {
       rootDir: null,
       fonsDir: noWorkspaceFonsDir(appData),
       appData,
+      artifactDir,
       sessionId: input.conversationId,
     };
   }
@@ -230,6 +281,7 @@ function resolveHookContext(input, scopeMode) {
     scope: "workspace",
     rootDir: path.resolve(rootDir),
     appData: resolveAppData(input),
+    artifactDir,
     sessionId: input.conversationId,
   };
 }
