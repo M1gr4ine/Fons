@@ -37,8 +37,8 @@ function writeIdeas(workspaceDir, content, ageSeconds = 0, sessionId = workspace
   return ideasPath;
 }
 
-function runHook(payload, env = {}) {
-  const res = spawnSync(process.execPath, [HOOK_SCRIPT], {
+function runHook(payload, env = {}, args = []) {
+  const res = spawnSync(process.execPath, [HOOK_SCRIPT, ...args], {
     input: JSON.stringify(payload),
     encoding: "utf8",
     env: { ...process.env, ...env },
@@ -424,6 +424,52 @@ test("Stop 仅结清回复中确认的条目，并补投新条目", (t) => {
   assert.deepEqual(runStop(ws, "11111111-1111-4111-8111-111111111109", { transcriptPath }), { decision: "allow" });
 });
 
+test("Stop 兼容末尾并列/多行/中文分隔的多个 FONS_ACK，但仍拒绝正文内伪造回执", (t) => {
+  const sid = "11111111-1111-4111-8111-111111111112";
+  const ws = makeTempDir(t, sid);
+  const ideasPath = path.join(ws, ".agents", "fons", `ideas-${sid}.md`);
+  const log = "transcript.jsonl";
+
+  // 1) 末行并列多个 [FONS_ACK: ...]（复现无工作区分批投递后模型自然输出格式）
+  writeIdeas(ws, "- [ ] 补充智谱\n- [ ] 补充 OpenAI", 70, sid);
+  const firstBatch = deliver(ws, sid);
+  const a1 = ackToken(firstBatch, 0);
+  const a2 = ackToken(firstBatch, 1);
+
+  // 正文或混杂文字的末行不应触发确认
+  let transcriptPath = writeTranscript(ws, log, [
+    userStep,
+    answer(`说明：[FONS_ACK: ${a1}]\n已完成 [FONS_ACK: ${a2}]`),
+  ]);
+  const blocked = runStop(ws, sid, { transcriptPath });
+  assert.equal(blocked.decision, "continue");
+  const b1 = ackToken(blocked.reason, 0);
+  const b2 = ackToken(blocked.reason, 1);
+
+  transcriptPath = writeTranscript(ws, log, [
+    userStep,
+    answer(`已整理。\n\n[FONS_ACK: ${b1}] [FONS_ACK: ${b2}]`, 2),
+  ]);
+  assert.deepEqual(runStop(ws, sid, { transcriptPath, continuationActive: true }), { decision: "allow" });
+  assert.equal(fs.readFileSync(ideasPath, "utf8"), "【√】 补充智谱\n【√】 补充 OpenAI");
+
+  // 2) 连续多行末尾 ACK 与中文逗号/冒号分隔
+  writeIdeas(ws, "【√】 补充智谱\n【√】 补充 OpenAI\n- [ ] 第三项\n- [ ] 第四项\n- [ ] 第五项", 70, sid);
+  const secondBatch = deliver(ws, sid);
+  const c1 = ackToken(secondBatch, 0);
+  const c2 = ackToken(secondBatch, 1);
+  const c3 = ackToken(secondBatch, 2);
+  transcriptPath = writeTranscript(ws, log, [
+    userStep,
+    answer(`全部完成。\n[FONS_ACK：${c1}，${c2}]\n[FONS_ACK: ${c3}]`, 3),
+  ]);
+  assert.deepEqual(runStop(ws, sid, { transcriptPath }), { decision: "allow" });
+  assert.equal(
+    fs.readFileSync(ideasPath, "utf8"),
+    "【√】 补充智谱\n【√】 补充 OpenAI\n【√】 第三项\n【√】 第四项\n【√】 第五项",
+  );
+});
+
 test("Stop 拒绝跨轮确认和旧启发式账本，并检查完整日志的最后一条答复", (t) => {
   const ws = makeTempDir(t, "11111111-1111-4111-8111-111111111110");
   writeIdeas(ws, "- [ ] 解释模块职责", 70);
@@ -475,17 +521,169 @@ test("已完成的同文灵感重新加入时投递一次，归档不改变它�
   assert.match(deliver(ws, "11111111-1111-4111-8111-111111111111"), /检查文档/);
 });
 
-test('No Project does not register a scratch cwd or deliver from it', (t) => {
+test('No Project registers under appData no-workspace without touching scratch cwd and delivers with inline ACK hint', (t) => {
   const cwd = makeTempDir(t, HOOK_A);
   const appData = path.join(cwd, 'host');
   const transcriptPath = path.join(appData, 'brain', HOOK_A, 'transcript.jsonl');
-  const input = { cwd, workspacePaths: [], conversationId: HOOK_A, transcriptPath };
+  const input = { cwd, workspacePaths: [], conversationId: HOOK_A, transcriptPath, lastUserInput: '无工作区闲聊' };
   writeIdeas(cwd, 'scratch marker', 70);
+
   assert.deepEqual(runHook({ ...input, hookEventName: 'SessionStart' }), {});
+  const index = path.join(appData, 'fons', 'conversations', `${HOOK_A}.json`);
+  const entry = JSON.parse(fs.readFileSync(index, 'utf8'));
+  assert.equal(entry.scope, 'no-workspace');
+  assert.equal(entry.rootDir, null);
+  assert.equal(entry.title, '无工作区闲聊');
+  assert.equal(fs.existsSync(path.join(cwd, '.agents', 'fons', '.state-' + HOOK_A + '.json')), false);
+
+  // Scratch cwd inbox is never read or delivered
   assert.deepEqual(runHook({ ...input, hookEventName: 'PreInvocation' }, { FONS_DEBOUNCE_SEC: '0' }), {});
   assert.deepEqual(runStop(cwd, HOOK_A, input), { decision: 'allow' });
-  assert.equal(fs.existsSync(path.join(appData, 'fons')), false);
+
+  // No-workspace inbox delivers with a one-time inline ACK hint, omits it on follow-up deliveries, and settles on Stop
+  const noWsCtx = { scope: 'no-workspace', rootDir: null, fonsDir: store.noWorkspaceFonsDir(appData), sessionId: HOOK_A };
+  store.addIdeas({ ...noWsCtx, texts: ['整理方案要点'] });
+  const preOut = runHook({ ...input, hookEventName: 'PreInvocation' }, { FONS_DEBOUNCE_SEC: '0' });
+  const msg = preOut.injectSteps[0].systemMessage.systemMessage;
+  assert.match(msg, /^\[FONS\] 完成后末行附 \[FONS_ACK: 编号\]\n1\. 整理方案要点 \[FONS:[a-f0-9]{8}\]$/);
+  assert.doesNotMatch(msg, /scratch marker/);
+
+  const token = ackToken(msg);
+  writeTranscript(path.dirname(transcriptPath), 'transcript.jsonl', [userStep, answer(`已整理。\n[FONS_ACK: ${token}]`)]);
+  assert.deepEqual(runStop(cwd, HOOK_A, input), { decision: 'allow' });
+  assert.equal(fs.readFileSync(store.sessionPaths(noWsCtx).ideas, 'utf8'), '【√】 整理方案要点\n');
   assert.equal(fs.existsSync(path.join(cwd, '.agents', 'fons', '.state-' + HOOK_A + '.json')), false);
+
+  store.addIdeas({ ...noWsCtx, texts: ['第二次补充只留真实内容'] });
+  const followUpOut = runHook({ ...input, hookEventName: 'PreInvocation' }, { FONS_DEBOUNCE_SEC: '0' });
+  assert.match(
+    followUpOut.injectSteps[0].systemMessage.systemMessage,
+    /^\[FONS\]\n1\. 第二次补充只留真实内容 \[FONS:[a-f0-9]{8}\]$/,
+  );
+
+  // Resolves appData via artifactDirectoryPath when transcriptPath is absent, and fails closed without either
+  const artifactDirectoryPath = path.join(appData, 'brain', HOOK_B);
+  const inputB = { workspacePaths: [], conversationId: HOOK_B, artifactDirectoryPath, lastUserInput: 'artifact' };
+  assert.deepEqual(runHook({ ...inputB, hookEventName: 'SessionStart' }), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_B }).scope, 'no-workspace');
+
+  // If Stop is the first delivery in a no-workspace session, later PreInvocation also skips the hint
+  const noWsCtxB = { scope: 'no-workspace', rootDir: null, fonsDir: store.noWorkspaceFonsDir(appData), sessionId: HOOK_B };
+  store.addIdeas({ ...noWsCtxB, texts: ['收尾首次兜底'] });
+  const stopFirst = runStop(cwd, HOOK_B, inputB);
+  assert.equal(stopFirst.decision, 'continue');
+  assert.match(stopFirst.reason, /\[FONS_ACK: 编号\]/);
+  store.addIdeas({ ...noWsCtxB, texts: ['后续 PreInvocation 无重复提示'] });
+  const afterStopPre = runHook({ ...inputB, hookEventName: 'PreInvocation' }, { FONS_DEBOUNCE_SEC: '0' });
+  assert.match(
+    afterStopPre.injectSteps[0].systemMessage.systemMessage,
+    /^\[FONS\]\n1\. 后续 PreInvocation 无重复提示 \[FONS:[a-f0-9]{8}\]$/,
+  );
+
+  assert.deepEqual(runHook({ hookEventName: 'SessionStart', workspacePaths: [], conversationId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', cwd }), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' }), null);
+});
+
+test('Hook --scope strictly separates workspace and no-workspace plugins', (t) => {
+  const ws = makeTempDir(t, HOOK_A);
+  const appData = path.join(ws, 'host');
+  const wsTranscript = path.join(appData, 'brain', HOOK_A, 'transcript.jsonl');
+  const noWsTranscript = path.join(appData, 'brain', HOOK_B, 'transcript.jsonl');
+  writeIdeas(ws, '- [ ] workspace item', 70, HOOK_A);
+  store.addIdeas({ fonsDir: store.noWorkspaceFonsDir(appData), sessionId: HOOK_B, texts: ['no-ws item'] });
+
+  const wsPayload = { hookEventName: 'PreInvocation', conversationId: HOOK_A, cwd: ws, workspacePaths: [ws], transcriptPath: wsTranscript };
+  const noWsPayload = { hookEventName: 'PreInvocation', conversationId: HOOK_B, cwd: ws, workspacePaths: [], transcriptPath: noWsTranscript };
+
+  assert.deepEqual(runHook(wsPayload, { FONS_DEBOUNCE_SEC: '0' }, ['--scope=no-workspace']), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_A }), null);
+  assert.deepEqual(runHook(noWsPayload, { FONS_DEBOUNCE_SEC: '0' }, ['--scope=workspace']), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_B }), null);
+
+  const wsDelivered = runHook(wsPayload, { FONS_DEBOUNCE_SEC: '0' }, ['--scope=workspace']);
+  assert.match(wsDelivered.injectSteps[0].systemMessage.systemMessage, /^\[FONS\]\n1\. workspace item/);
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_A }).scope, 'workspace');
+
+  const noWsDelivered = runHook(noWsPayload, { FONS_DEBOUNCE_SEC: '0' }, ['--scope=no-workspace']);
+  assert.match(noWsDelivered.injectSteps[0].systemMessage.systemMessage, /^\[FONS\] 完成后末行附 \[FONS_ACK: 编号\]\n1\. no-ws item/);
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_B }).scope, 'no-workspace');
+});
+
+test('ui-plugin no-workspace hook works through a junction with custom host appData, retraction, ACK settle, and workspace isolation', (t) => {
+  const root = makeTempDir(t);
+  const linkedPlugin = path.join(root, 'plugins', 'fons-pool');
+  fs.mkdirSync(path.dirname(linkedPlugin), { recursive: true });
+  fs.symlinkSync(path.join(REPO_ROOT, 'ui-plugin'), linkedPlugin, process.platform === 'win32' ? 'junction' : 'dir');
+  const uiHooks = JSON.parse(fs.readFileSync(path.join(linkedPlugin, 'hooks.json'), 'utf8'));
+  const hookCommand = uiHooks['fons-no-workspace'].PreInvocation[0].command;
+  assert.equal(hookCommand, 'node scripts/bootstrap-hook.mjs');
+
+  const runUiHook = (payload, extraEnv = {}) => {
+    const res = spawnSync(process.execPath, ['scripts/bootstrap-hook.mjs'], {
+      cwd: linkedPlugin,
+      input: JSON.stringify(payload),
+      encoding: 'utf8',
+      env: { ...process.env, FONS_APP_DATA: '', ...extraEnv },
+    });
+    assert.equal(res.status, 0, `ui-plugin hook exited with ${res.status}: ${res.stderr}`);
+    return JSON.parse(res.stdout.trim());
+  };
+
+  // Custom host appData outside USERPROFILE and without FONS_APP_DATA (verifies single directory source)
+  const appData = path.join(root, 'custom-host-data');
+  const transcriptPath = path.join(appData, 'brain', HOOK_A, 'transcript.jsonl');
+
+  // SessionStart registers under custom host appData even when inbox is empty
+  const noWsStart = { hookEventName: 'SessionStart', conversationId: HOOK_A, workspacePaths: [], transcriptPath, lastUserInput: '全局会话' };
+  assert.deepEqual(runUiHook(noWsStart), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_A }).scope, 'no-workspace');
+
+  // Empty no-workspace inbox returns fallback cleanly
+  const noWsPre = { hookEventName: 'PreInvocation', conversationId: HOOK_A, workspacePaths: [], transcriptPath };
+  assert.deepEqual(runUiHook(noWsPre, { FONS_DEBOUNCE_SEC: '0' }), {});
+  assert.deepEqual(runUiHook({ ...noWsPre, hookEventName: 'Stop', terminationReason: 'NO_TOOL_CALL', fullyIdle: true }), { decision: 'allow' });
+
+  // Non-empty inbox in custom host appData delivers immediately without needing FONS_APP_DATA
+  const noWsCtx = { fonsDir: store.noWorkspaceFonsDir(appData), sessionId: HOOK_A };
+  store.addIdeas({ ...noWsCtx, texts: ['经 junction 投递'] });
+  const delivered = runUiHook(noWsPre, { FONS_DEBOUNCE_SEC: '0' });
+  const msg = delivered.injectSteps[0].systemMessage.systemMessage;
+  assert.match(msg, /经 junction 投递/);
+
+  // Workspace payload is ignored even while no-workspace inbox is non-empty
+  const wsPayload = { hookEventName: 'PreInvocation', conversationId: HOOK_B, cwd: root, workspacePaths: [root], transcriptPath: path.join(appData, 'brain', HOOK_B, 'transcript.jsonl') };
+  assert.deepEqual(runUiHook(wsPayload, { FONS_DEBOUNCE_SEC: '0' }), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_B }), null);
+
+  // Removing delivered item sends withdrawal once and then returns empty
+  const row = store.readPoolSnapshot(noWsCtx).items[0];
+  store.removeIdea({ ...noWsCtx, rowIndex: row.rowIndex, expectedRaw: row.raw });
+  const retracted = runUiHook(noWsPre);
+  assert.match(retracted.injectSteps[0].systemMessage.systemMessage, /\[FONS 撤回\][\s\S]*经 junction 投递/);
+  assert.deepEqual(runUiHook(noWsPre), {});
+
+  // Re-add and settle via Stop ACK
+  store.addIdeas({ ...noWsCtx, texts: ['最终收尾确认'] });
+  const secondMsg = runUiHook(noWsPre, { FONS_DEBOUNCE_SEC: '0' }).injectSteps[0].systemMessage.systemMessage;
+  assert.match(secondMsg, /^\[FONS\]\n1\. 最终收尾确认 \[FONS:[a-f0-9]{8}\]$/);
+  const token = ackToken(secondMsg);
+  writeTranscript(path.dirname(transcriptPath), 'transcript.jsonl', [userStep, answer(`已完成。\n[FONS_ACK: ${token}]`)]);
+  assert.deepEqual(runUiHook({ ...noWsPre, hookEventName: 'Stop', terminationReason: 'NO_TOOL_CALL', fullyIdle: true }), { decision: 'allow' });
+  assert.equal(fs.readFileSync(store.sessionPaths(noWsCtx).ideas, 'utf8'), '【√】 最终收尾确认\n');
+
+  // Copied real-directory plugin with fons-root.json resolves repo scripts without a junction
+  const copiedPlugin = path.join(root, 'plugins', 'fons-pool-copied');
+  fs.cpSync(path.join(REPO_ROOT, 'ui-plugin'), copiedPlugin, { recursive: true });
+  fs.writeFileSync(path.join(copiedPlugin, 'fons-root.json'), JSON.stringify({ root: REPO_ROOT }), 'utf8');
+  const copiedRes = spawnSync(process.execPath, ['scripts/bootstrap-hook.mjs'], {
+    cwd: copiedPlugin,
+    input: JSON.stringify({ hookEventName: 'SessionStart', conversationId: HOOK_B, workspacePaths: [], transcriptPath: path.join(appData, 'brain', HOOK_B, 'transcript.jsonl'), lastUserInput: '目录安装' }),
+    encoding: 'utf8',
+    env: { ...process.env, FONS_APP_DATA: '' },
+  });
+  assert.equal(copiedRes.status, 0, copiedRes.stderr);
+  assert.deepEqual(JSON.parse(copiedRes.stdout.trim()), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_B }).scope, 'no-workspace');
 });
 
 test('SessionStart registers an empty session without creating a workspace inbox', (t) => {

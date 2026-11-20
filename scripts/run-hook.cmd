@@ -13,7 +13,7 @@ if exist "%LOCAL_PLUG_MARKER%" (
 )
 
 :run
-node "%~dp0fons-hook.mjs"
+node "%~dp0fons-hook.mjs" --scope=workspace
 exit /b %ERRORLEVEL%
 
 :fast_exit

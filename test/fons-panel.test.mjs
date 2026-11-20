@@ -7,11 +7,14 @@ const html = fs.readFileSync(new URL('../sidecars/fons-pool/index.html', import.
 const script = html.match(/<script>\s*([\s\S]*?)<\/script>/)[1];
 
 class Element {
-  constructor() { this.hidden = false; this.disabled = false; this.textContent = ''; this.value = ''; this.style = {}; this.children = []; this.dataset = {}; this.listeners = {}; this.scrollHeight = 20; }
+  constructor() { this.hidden = false; this.disabled = false; this.textContent = ''; this.value = ''; this.style = {}; this.children = []; this.dataset = {}; this.listeners = {}; this.scrollHeight = 20; this.parentElement = null; }
   addEventListener(name, callback) { this.listeners[name] = callback; }
-  replaceChildren(...children) { this.children = children; }
-  append(...children) { this.children.push(...children); }
-  insertBefore(child, anchor) { const old = this.children.indexOf(child); if (old >= 0) this.children.splice(old, 1); const i = this.children.indexOf(anchor); this.children.splice(i < 0 ? this.children.length : i, 0, child); }
+  replaceChildren(...children) { for (const c of this.children) c.parentElement = null; this.children = children; for (const c of children) c.parentElement = this; }
+  append(...children) { for (const c of children) { c.parentElement = this; this.children.push(c); } }
+  insertBefore(child, anchor) { const old = this.children.indexOf(child); if (old >= 0) this.children.splice(old, 1); const i = this.children.indexOf(anchor); child.parentElement = this; this.children.splice(i < 0 ? this.children.length : i, 0, child); }
+  remove() { if (!this.parentElement) return; const i = this.parentElement.children.indexOf(this); if (i >= 0) this.parentElement.children.splice(i, 1); this.parentElement = null; this.isConnected = false; }
+  closest(selector) { const cls = selector.startsWith('.') ? selector.slice(1) : null; for (let cur = this; cur; cur = cur.parentElement) { if (cls && String(cur.className || '').split(/\s+/).includes(cls)) return cur; } return null; }
+  cloneNode(deep) { const copy = new Element(); copy.tag = this.tag; copy.className = this.className; copy.dataset = { ...this.dataset }; copy.textContent = this.textContent; if (deep) copy.append(...this.children.map((c) => c.cloneNode(true))); return copy; }
   setAttribute() {}
   querySelector(selector) { return this.children.find((child) => child.tag === selector || `.${child.className}` === selector); }
 }
@@ -38,24 +41,34 @@ function harness({ host = true, secureFetch = true } = {}) {
   if (!secureFetch) delete sidecar.fetch;
   const document = { hidden: false, activeElement: null, querySelector: (selector) => elements.get(selector), querySelectorAll: () => [], createElement(tag) { const el = new Element(); el.tag = tag; return el; }, addEventListener() {} };
   vm.runInNewContext(script, { window: { sidecar, localStorage }, document, location: { search: '' }, URLSearchParams, Promise, Date, setTimeout: () => 0, clearTimeout() {}, setInterval: (callback) => { tick = callback; }, queueMicrotask, fetch: sidecar.fetch });
-  return { elements, requests, sidecar, storage, workspace: (value) => workspaceChange(value), tick };
+  return { elements, requests, sidecar, storage, document, workspace: (value) => workspaceChange(value), tick };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const response = (data, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => data });
 
-test('waits for the host workspace, then stops polling when there is no project', async () => {
+test('waits for the host workspace, then polls no-workspace sessions with empty workspaceUris', async () => {
   const panel = harness();
   assert.equal(panel.requests.length, 0);
   panel.workspace([]);
-  panel.tick();
-  await settle();
-  assert.equal(panel.requests.length, 0);
-  assert.match(panel.elements.get('.empty').textContent, /工作区|项目/);
-  assert.equal(panel.elements.get('[data-testid="fons-quick-add"]').disabled, true);
-  panel.workspace(['file:///project']);
   await settle();
   assert.equal(panel.requests.length, 1);
+  assert.deepEqual(JSON.parse(panel.requests[0].options.body).workspaceUris, []);
+  panel.requests[0].resolve(response({ registered: false }));
+  await settle();
+  assert.match(panel.elements.get('.empty').textContent, /无工作区/);
+  assert.equal(panel.elements.get('[data-testid="fons-quick-add"]').disabled, true);
+  panel.tick();
+  await settle();
+  assert.equal(panel.requests.length, 2);
+  panel.requests[1].resolve(response({ ...snapshot('无工作区灵感'), scope: 'no-workspace' }));
+  await settle();
+  assert.equal(panel.elements.get('[data-testid="fons-quick-add"]').disabled, false);
+  assert.equal(panel.elements.get('.rows').children.length, 1);
+  submit(panel, '补充一条');
+  await settle();
+  assert.equal(panel.requests[2].url, '/api/pool/add');
+  assert.deepEqual(JSON.parse(panel.requests[2].options.body).workspaceUris, []);
 });
 
 test('a request error replaces loading and later recovery requests a fresh snapshot', async () => {
@@ -76,15 +89,38 @@ test('a request error replaces loading and later recovery requests a fresh snaps
   assert.match(panel.elements.get('.empty').textContent, /未登记/);
 });
 
-test('a response from a workspace that has closed cannot restore its contents', async () => {
+test('a response from a workspace that has closed cannot restore its contents and blocks stale session', async () => {
   const panel = harness();
-  panel.workspace(['file:///project']);
+  await openRegistered(panel);
+  panel.tick();
   await settle();
   panel.workspace([]);
-  panel.requests[0].resolve(response({ registered: false }));
+  panel.requests[1].resolve(response(snapshot('不应回填')));
   await settle();
-  assert.match(panel.elements.get('.empty').textContent, /工作区|项目/);
+  assert.equal(panel.requests.length, 2);
+  assert.equal(panel.elements.get('.rows').children.length, 0);
+  assert.match(panel.elements.get('.empty').textContent, /工作区|切换/);
   assert.equal(panel.elements.get('[data-testid="fons-quick-add"]').disabled, true);
+});
+
+test('scopeMismatch blocks stale workspace or cross-project session without poisoning its binding', async () => {
+  const panel = harness();
+  panel.workspace(['file:///project-b']);
+  await settle();
+  assert.equal(panel.requests.length, 1);
+  assert.deepEqual(JSON.parse(panel.requests[0].options.body).workspaceUris, ['file:///project-b']);
+  panel.requests[0].resolve(response({ registered: true, scopeMismatch: true, scope: 'workspace' }));
+  await settle();
+  assert.equal(panel.elements.get('[data-testid="fons-quick-add"]').disabled, true);
+  assert.match(panel.elements.get('.empty').textContent, /不匹配/);
+  panel.workspace(['file:///project-a']);
+  await settle();
+  assert.equal(panel.requests.length, 2);
+  assert.deepEqual(JSON.parse(panel.requests[1].options.body).workspaceUris, ['file:///project-a']);
+  panel.requests[1].resolve(response({ ...snapshot('恢复项目 A'), scope: 'workspace' }));
+  await settle();
+  assert.equal(panel.elements.get('[data-testid="fons-quick-add"]').disabled, false);
+  assert.equal(panel.elements.get('.rows').children.length, 1);
 });
 
 test('missing host bridge is reported without calling the API', async () => {
@@ -400,4 +436,136 @@ test('a conflicted blur edit still releases its active hold immediately', async 
   const releaseReq = panel.requests.find((req) => req.url === '/api/pool/release');
   assert.ok(releaseReq, 'conflicted blur still sends release');
   assert.equal(JSON.parse(releaseReq.options.body).id, '111111111111');
+});
+
+function attachMotion(panel, rowHeight = 36) {
+  const animations = [];
+  const pool = panel.elements.get('.pool');
+  const rows = panel.elements.get('.rows');
+  const empty = panel.elements.get('.empty');
+  pool.getBoundingClientRect = () => ({ top: 0, left: 0, width: 320, height: 480 });
+  const equip = (node) => {
+    node.getBoundingClientRect = () => {
+      if (!empty.hidden) return { top: 0, left: 0, width: 0, height: 0 };
+      const idx = rows.children.indexOf(node);
+      if (idx < 0) return { top: 0, left: 0, width: 0, height: 0 };
+      return { top: 44 + idx * rowHeight, left: 8, width: 304, height: rowHeight };
+    };
+    node.animate = (keyframes, options) => {
+      const anim = { node, keyframes, options, onfinish: null, oncancel: null, cancelled: false, cancel() { this.cancelled = true; this.oncancel?.(); } };
+      animations.push(anim);
+      return anim;
+    };
+    const origClone = node.cloneNode.bind(node);
+    node.cloneNode = (deep) => {
+      const clone = origClone(deep);
+      clone.animate = (keyframes, options) => {
+        const anim = { node: clone, keyframes, options, onfinish: null, oncancel: null, cancelled: false, cancel() { this.cancelled = true; this.oncancel?.(); } };
+        animations.push(anim);
+        return anim;
+      };
+      return clone;
+    };
+  };
+  for (const row of rows.children) equip(row);
+  return animations;
+}
+
+test('deleting a buffering row while its remove button is focused removes it immediately with exit animation', async () => {
+  const panel = harness();
+  await openRegistered(panel);
+  const [row] = panel.elements.get('.rows').children;
+  row.isConnected = true;
+  const animations = attachMotion(panel);
+  const removeBtn = row.querySelector('.remove');
+  panel.document.activeElement = removeBtn;
+
+  removeBtn.listeners.click();
+  await settle();
+  // Rapid second click while removal is in flight must be ignored
+  removeBtn.listeners.click();
+  await settle();
+  assert.equal(panel.requests.length, 2);
+  assert.equal(panel.requests[1].url, '/api/pool/remove');
+
+  panel.requests[1].resolve(response({ conflict: false }));
+  await settle();
+  assert.equal(panel.requests[2].url, '/api/pool');
+  panel.requests[2].resolve(response({ registered: true, items: [], etag: 'etag-empty', debounceMs: 45000, canArchive: false }));
+  await settle();
+
+  assert.equal(panel.elements.get('.rows').children.length, 0);
+  assert.equal(panel.elements.get('.pool').dataset.phase, 'idle');
+  assert.equal(panel.elements.get('.empty').hidden, false);
+  assert.equal(panel.elements.get('.notice').textContent, '');
+  const ghostAnim = animations.find((a) => a.node.className === 'row ghost');
+  assert.ok(ghostAnim, 'exit animation plays even when deleting the last item');
+  assert.equal(ghostAnim.node.querySelector('textarea').value, '原会话内容');
+  assert.equal(ghostAnim.node.style.top, '44px');
+  assert.equal(ghostAnim.node.style.height, '36px');
+  assert.equal(panel.elements.get('.pool').children.includes(ghostAnim.node), true);
+  ghostAnim.onfinish();
+  assert.equal(panel.elements.get('.pool').children.includes(ghostAnim.node), false);
+});
+
+test('deleting the first of two buffering rows removes it at its original slot and glides the remaining row up', async () => {
+  const panel = harness();
+  panel.workspace(['file:///project-a']);
+  const first = { id: 'aaaaaaaaaaaa', token: 't1', status: 'buffering', text: '第一条', raw: '- [ ] 第一条\n', rowIndex: 0, remainingMs: 30000, editingHold: false };
+  const second = { id: 'bbbbbbbbbbbb', token: 't2', status: 'buffering', text: '第二条', raw: '- [ ] 第二条\n', rowIndex: 1, remainingMs: 20000, editingHold: false };
+  panel.requests[0].resolve(response({ registered: true, items: [first, second], etag: 'etag-2', debounceMs: 45000, canArchive: false }));
+  await settle();
+
+  const [row1, row2] = panel.elements.get('.rows').children;
+  row1.isConnected = true;
+  row2.isConnected = true;
+  const animations = attachMotion(panel, 36);
+  const removeBtn = row1.querySelector('.remove');
+  panel.document.activeElement = removeBtn;
+
+  removeBtn.listeners.click();
+  await settle();
+  assert.equal(panel.requests[1].url, '/api/pool/remove');
+  panel.requests[1].resolve(response({ conflict: false }));
+  await settle();
+  panel.requests[2].resolve(response({
+    registered: true,
+    items: [{ ...second, rowIndex: 0 }],
+    etag: 'etag-1-left', debounceMs: 45000, canArchive: false,
+  }));
+  await settle();
+
+  assert.equal(panel.elements.get('.rows').children.length, 1);
+  assert.equal(panel.elements.get('.rows').children[0], row2);
+  assert.equal(row2.item.text, '第二条');
+  assert.equal(row2.item.rowIndex, 0);
+  const ghostAnim = animations.find((a) => a.node.className === 'row ghost');
+  assert.ok(ghostAnim);
+  assert.equal(ghostAnim.node.style.top, '44px');
+  const shiftAnim = animations.find((a) => a.node === row2);
+  assert.ok(shiftAnim, 'remaining sibling plays FLIP shift animation');
+  assert.equal(shiftAnim.keyframes[0].transform, 'translateY(36px)');
+});
+
+test('deleting a row whose textarea was cleared or conflicted externally still detaches the stale row', async () => {
+  const panel = harness();
+  await openRegistered(panel);
+  const [row] = panel.elements.get('.rows').children;
+  row.isConnected = true;
+  row.dirty = true;
+  row.querySelector('textarea').value = '';
+  const removeBtn = row.querySelector('.remove');
+  panel.document.activeElement = removeBtn;
+
+  removeBtn.listeners.click();
+  await settle();
+  assert.equal(panel.requests[1].url, '/api/pool/remove');
+  panel.requests[1].resolve(response({ conflict: true }));
+  await settle();
+  panel.requests[2].resolve(response({ registered: true, items: [], etag: 'etag-gone', debounceMs: 45000, canArchive: false }));
+  await settle();
+
+  assert.equal(panel.elements.get('.notice').textContent, '内容已被修改');
+  assert.equal(panel.elements.get('.rows').children.length, 0);
+  assert.equal(panel.elements.get('.pool').dataset.phase, 'idle');
 });

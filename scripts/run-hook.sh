@@ -7,11 +7,11 @@ REL_FONS="../../fons"
 
 if [ -f "$LOCAL_PLUG_MARKER" ] && [ "${1:-}" != "SessionStart" ]; then
   for file in "$REL_FONS"/ideas-*.md "$REL_FONS"/ideas.md; do
-    if [ -s "$file" ]; then exec node "$SCRIPT_DIR/fons-hook.mjs"; fi
+    if [ -s "$file" ]; then exec node "$SCRIPT_DIR/fons-hook.mjs" --scope=workspace; fi
   done
   if [ "${1:-}" = "PreInvocation" ]; then
     for file in "$REL_FONS"/.retract-*.pending; do
-      if [ -f "$file" ]; then exec node "$SCRIPT_DIR/fons-hook.mjs"; fi
+      if [ -f "$file" ]; then exec node "$SCRIPT_DIR/fons-hook.mjs" --scope=workspace; fi
     done
   fi
   if [ "${1:-}" = "Stop" ]; then
@@ -22,4 +22,4 @@ if [ -f "$LOCAL_PLUG_MARKER" ] && [ "${1:-}" != "SessionStart" ]; then
   exit 0
 fi
 
-exec node "$SCRIPT_DIR/fons-hook.mjs"
+exec node "$SCRIPT_DIR/fons-hook.mjs" --scope=workspace

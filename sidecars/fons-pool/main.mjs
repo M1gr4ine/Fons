@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   addIdeas, archiveCompleted, completeIdea, findAppData, getMigrationWarning,
@@ -46,7 +47,39 @@ function readPool(context, { etag: previous }) {
   const etag = warning ? snapshot.etag + '|' + warning.status : snapshot.etag;
   if (previous === etag) return { unchanged: true, etag };
   const migrationWarning = warning ? { status: warning.status, message: warning.message } : null;
-  return { ...snapshot, registered: true, migrationWarning, etag };
+  return { ...snapshot, registered: true, scope: context.scope, migrationWarning, etag };
+}
+
+function canonicalPath(dir) {
+  let resolved = path.resolve(dir);
+  try { resolved = fs.realpathSync.native(resolved); }
+  catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error; }
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function uriToWorkspacePath(uri) {
+  try { return fileURLToPath(uri); }
+  catch (error) {
+    if (error instanceof TypeError) return null;
+    throw error;
+  }
+}
+
+function workspaceMatchesRoot(workspaceUris, rootDir) {
+  const target = canonicalPath(rootDir);
+  return workspaceUris.some((uri) => {
+    const wsPath = uriToWorkspacePath(uri);
+    if (!wsPath) return false;
+    const base = canonicalPath(wsPath);
+    const rel = path.relative(base, target);
+    return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
+  });
+}
+
+function hasWorkspaceMismatch(entry, workspaceUris) {
+  if (workspaceUris === undefined) return false;
+  if (!workspaceUris.length) return entry.scope !== 'no-workspace';
+  return entry.scope !== 'workspace' || !workspaceMatchesRoot(workspaceUris, entry.rootDir);
 }
 
 function mutate(operation, fields) {
@@ -73,10 +106,18 @@ function boundHandler(appData, action) {
   return (data = {}) => {
     const sessionId = data.conversationId;
     if (!isValidSessionId(sessionId)) return jsonError(400, '无效的会话 ID。');
+    if (data.workspaceUris !== undefined && (!Array.isArray(data.workspaceUris) || !data.workspaceUris.every((s) => typeof s === 'string'))) {
+      return jsonError(400, '无效参数：workspaceUris');
+    }
     if (!appData) return jsonError(503, '无法定位宿主数据目录。');
     const entry = lookupConversation({ appData, sessionId });
-    if (!entry) return action === readPool ? { registered: false } : jsonError(404, '当前会话尚未由项目的 Fons Hook 登记。');
-    return action({ rootDir: entry.rootDir, sessionId }, data);
+    if (!entry) return action === readPool ? { registered: false } : jsonError(404, '当前会话尚未由 Fons Hook 登记。');
+    if (hasWorkspaceMismatch(entry, data.workspaceUris)) {
+      return action === readPool
+        ? { registered: true, scopeMismatch: true, scope: entry.scope }
+        : jsonError(409, '当前会话与工作区状态不匹配。');
+    }
+    return action({ scope: entry.scope, rootDir: entry.rootDir, fonsDir: entry.fonsDir, sessionId }, data);
   };
 }
 

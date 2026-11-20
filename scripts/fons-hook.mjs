@@ -4,11 +4,15 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   completeAcknowledgedIdeas, computeDebounce, findAppData, isValidSessionId, migrateLegacyInbox,
-  readJson, readPoolData, registerConversation, sessionPaths, withPoolWrite, writeJsonAtomic,
+  noWorkspaceFonsDir, readJson, readPoolData, registerConversation, sessionPaths, withPoolWrite,
+  writeJsonAtomic,
 } from "./fons-store.mjs";
 
 const MAX_STOP_CONTINUES = 2;
-const ACK_LINE = /(?:^|\r?\n)\[FONS_ACK:[ \t]*([a-f0-9]{8}(?:,[ \t]*[a-f0-9]{8})*)\][ \t]*$/;
+const ACK_TAG = "\\[FONS_ACK[:：][ \\t]*[a-f0-9]{8}(?:(?:[ \\t]*[,，][ \\t]*|[ \\t]+)[a-f0-9]{8})*\\]";
+const ACK_LINE = new RegExp(`^[ \\t]*${ACK_TAG}(?:[ \\t]*[,，]?[ \\t]*${ACK_TAG})*[ \\t]*$`);
+const ACK_TOKEN = /\b[a-f0-9]{8}\b/g;
+const NO_WORKSPACE_PRE_HEADER = "[FONS] 完成后末行附 [FONS_ACK: 编号]";
 
 function tryParseJson(line) {
   try {
@@ -65,8 +69,13 @@ function readTurnAcknowledgments(transcriptPath) {
   if (!isCompletedResponse(response)) return new Set();
 
   const content = resolveResponseContent(transcriptPath, response);
-  const match = ACK_LINE.exec(content.trimEnd());
-  return new Set(match?.[1].split(/,[ \t]*/));
+  const lines = content.trimEnd().split(/\r?\n/);
+  const tokens = new Set();
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!ACK_LINE.test(lines[i])) break;
+    for (const token of lines[i].match(ACK_TOKEN)) tokens.add(token);
+  }
+  return tokens;
 }
 
 function markDelivered(items, { state, ui }) {
@@ -112,7 +121,7 @@ function syncPendingLedger(state, pendingAt, deliveredIds) {
   delete state.pendingSigAt;
 }
 
-function handlePreInvocation(data) {
+function handlePreInvocation(data, context) {
   const { ready, pendingAt } = computeDebounce(data);
   const { state } = data;
   const deliveredIds = new Set();
@@ -120,7 +129,10 @@ function handlePreInvocation(data) {
   if (ready.length) {
     const numbered = markDelivered(ready, data);
     for (const item of ready) deliveredIds.add(item.id);
-    messages.push("[FONS]\n" + numbered);
+    const sendHint = context.scope === "no-workspace" && !state.ackHintSent;
+    if (sendHint) state.ackHintSent = true;
+    const header = sendHint ? NO_WORKSPACE_PRE_HEADER : "[FONS]";
+    messages.push(header + "\n" + numbered);
   }
   syncPendingLedger(state, pendingAt, deliveredIds);
   const retracted = collectRetractions(data);
@@ -145,7 +157,7 @@ function settleAcknowledged(items, data, tokens) {
   return items.filter(({ id }) => !ids.has(id));
 }
 
-function handleStop(input, data, tokens) {
+function handleStop(input, data, tokens, context) {
   const { state, ui, items } = data;
   const timing = computeDebounce(data);
   const open = items.filter((item) => {
@@ -171,6 +183,7 @@ function handleStop(input, data, tokens) {
   }
   state.lastStopSig = signature;
   state.stopCount = count + 1;
+  if (context.scope === "no-workspace") state.ackHintSent = true;
   const numbered = markDelivered(remaining, data);
   syncPendingLedger(state, timing.pendingAt, new Set(remaining.map((item) => item.id)));
   const reminder = "[FONS 收尾核对] 以下补充待处理（完成后在回复末行附 [FONS_ACK: 编号]）：\n" + numbered;
@@ -178,16 +191,58 @@ function handleStop(input, data, tokens) {
   return { decision: "continue", reason };
 }
 
-function registerSession(input, context) {
-  const appData = findAppData(input.transcriptPath, "brain");
-  if (appData) registerConversation({ ...context, appData, title: input.lastUserInput });
+function resolveAppData(input) {
+  return findAppData(input.transcriptPath, "brain") || findAppData(input.artifactDirectoryPath, "brain");
+}
+
+function parseScope(argv) {
+  let scope = "all";
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg.startsWith("--scope=")) scope = arg.slice("--scope=".length);
+    else if (arg === "--scope") scope = argv[++i] ?? "";
+  }
+  if (!["all", "workspace", "no-workspace"].includes(scope)) {
+    throw new Error(`无效的 Hook 作用域：${scope}`);
+  }
+  return scope;
+}
+
+function resolveHookContext(input, scopeMode) {
+  if (!isValidSessionId(input.conversationId)) return null;
+  const isNoWorkspace = Array.isArray(input.workspacePaths) ? input.workspacePaths.length === 0 : !input.cwd;
+  if (isNoWorkspace) {
+    if (scopeMode === "workspace") return null;
+    const appData = resolveAppData(input);
+    if (!appData) return null;
+    return {
+      scope: "no-workspace",
+      rootDir: null,
+      fonsDir: noWorkspaceFonsDir(appData),
+      appData,
+      sessionId: input.conversationId,
+    };
+  }
+  if (scopeMode === "no-workspace") return null;
+  const rootDir = input.cwd || input.workspacePaths?.[0];
+  if (!rootDir) return null;
+  return {
+    scope: "workspace",
+    rootDir: path.resolve(rootDir),
+    appData: resolveAppData(input),
+    sessionId: input.conversationId,
+  };
 }
 
 function handleSessionEvent(input, context, fallback) {
   const paths = sessionPaths(context);
-  if (fs.existsSync(path.join(paths.fonsDir, "ideas.md"))) migrateLegacyInbox(context);
+  if (context.scope === "workspace" && fs.existsSync(path.join(paths.fonsDir, "ideas.md"))) {
+    migrateLegacyInbox(context);
+  }
   const event = input.hookEventName;
-  if (event !== "Stop") registerSession(input, context);
+  if (event !== "Stop" && context.appData) {
+    registerConversation({ ...context, title: input.lastUserInput });
+  }
   if (event === "SessionStart") return fallback;
   const inbox = fs.statSync(paths.ideas, { throwIfNoEntry: false });
   const retraction = event === "PreInvocation" && fs.existsSync(paths.retractMarker);
@@ -197,28 +252,28 @@ function handleSessionEvent(input, context, fallback) {
   return withPoolWrite(context, () => {
     const data = readPoolData(context);
     const before = JSON.stringify(data.state);
-    const result = event === "Stop" ? handleStop(input, data, tokens) : handlePreInvocation(data);
+    const result = event === "Stop" ? handleStop(input, data, tokens, context) : handlePreInvocation(data, context);
     if (JSON.stringify(data.state) !== before) writeJsonAtomic(paths.state, data.state);
     if (retraction || result.decision === "continue") clearRetractionMarker(data);
     return result;
   });
 }
 
-function evaluateHook(input) {
+export function evaluateHook(input, scopeMode = "all") {
   const event = input.hookEventName;
   const fallback = event === "Stop" ? { decision: "allow" } : {};
   if (!["PreInvocation", "SessionStart", "Stop"].includes(event)) return fallback;
-  if (input.workspacePaths?.length === 0) return fallback;
-  const rootDir = input.cwd || input.workspacePaths?.[0];
-  if (!rootDir || !isValidSessionId(input.conversationId)) return fallback;
   if (event === "Stop" && (input.terminationReason !== "NO_TOOL_CALL" || input.fullyIdle === false)) return fallback;
-  return handleSessionEvent(input, { rootDir: path.resolve(rootDir), sessionId: input.conversationId }, fallback);
+  const context = resolveHookContext(input, scopeMode);
+  if (!context) return fallback;
+  return handleSessionEvent(input, context, fallback);
 }
 
-function main() {
+export function runMain(argv = process.argv.slice(2)) {
+  const scopeMode = parseScope(argv);
   const rawInput = fs.readFileSync(0, "utf8");
   const input = rawInput ? JSON.parse(rawInput) : {};
-  process.stdout.write(JSON.stringify(evaluateHook(input)));
+  process.stdout.write(JSON.stringify(evaluateHook(input, scopeMode)));
 }
 
 function isMainModule() {
@@ -228,5 +283,5 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  main();
+  runMain();
 }

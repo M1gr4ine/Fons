@@ -13,16 +13,26 @@ export function isValidSessionId(sessionId) {
   return typeof sessionId === 'string' && UUID.test(sessionId);
 }
 
-export function sessionPaths({ rootDir, sessionId }) {
+export function noWorkspaceFonsDir(appData) {
+  return path.join(path.resolve(appData), 'fons', 'no-workspace');
+}
+
+function resolveFonsDir({ fonsDir, rootDir }) {
+  if (typeof fonsDir === 'string' && fonsDir) return fonsDir;
+  if (typeof rootDir === 'string' && rootDir) return path.join(rootDir, '.agents', 'fons');
+  throw new Error('缺少有效的存储目录。');
+}
+
+export function sessionPaths({ fonsDir, rootDir, sessionId }) {
   if (!isValidSessionId(sessionId)) throw new Error('无效的会话 ID。');
-  const fonsDir = path.join(rootDir, '.agents', 'fons');
+  const dir = resolveFonsDir({ fonsDir, rootDir });
   return {
-    fonsDir,
-    ideas: path.join(fonsDir, `ideas-${sessionId}.md`),
-    state: path.join(fonsDir, `.state-${sessionId}.json`),
-    ui: path.join(fonsDir, `.ui-${sessionId}.json`),
-    archive: path.join(fonsDir, 'archive', `${sessionId}.md`),
-    retractMarker: path.join(fonsDir, `.retract-${sessionId}.pending`),
+    fonsDir: dir,
+    ideas: path.join(dir, `ideas-${sessionId}.md`),
+    state: path.join(dir, `.state-${sessionId}.json`),
+    ui: path.join(dir, `.ui-${sessionId}.json`),
+    archive: path.join(dir, 'archive', `${sessionId}.md`),
+    retractMarker: path.join(dir, `.retract-${sessionId}.pending`),
   };
 }
 
@@ -147,20 +157,43 @@ function publishConversation(filePath, entry) {
   return readJson(filePath);
 }
 
-export function registerConversation({ appData, sessionId, rootDir, title }) {
+function normalizeConversation(appData, entry) {
+  const scope = entry.scope ?? (typeof entry.rootDir === 'string' && entry.rootDir ? 'workspace' : null);
+  if (scope === 'no-workspace') {
+    return {
+      scope: 'no-workspace',
+      rootDir: null,
+      fonsDir: noWorkspaceFonsDir(appData),
+      title: entry.title ?? '',
+      registeredAt: entry.registeredAt,
+    };
+  }
+  if (scope === 'workspace' && typeof entry.rootDir === 'string' && entry.rootDir) {
+    return {
+      scope: 'workspace',
+      rootDir: entry.rootDir,
+      fonsDir: path.join(entry.rootDir, '.agents', 'fons'),
+      title: entry.title ?? '',
+      registeredAt: entry.registeredAt,
+    };
+  }
+  return null;
+}
+
+export function registerConversation({ appData, sessionId, rootDir = null, scope = rootDir ? 'workspace' : 'no-workspace', title }) {
+  if (scope !== 'workspace' && scope !== 'no-workspace') throw new Error('无效的会话作用域。');
+  if (scope === 'workspace' && (typeof rootDir !== 'string' || !rootDir)) throw new Error('缺少有效的工作区目录。');
   const filePath = indexPath(appData, sessionId);
   if (fs.existsSync(filePath)) return readJson(filePath);
   const cleanTitle = Array.from(String(title ?? '').replace(/[\r\n\u2028\u2029]/g, '')).slice(0, 20).join('');
-  const entry = { rootDir, title: cleanTitle, registeredAt: Date.now() };
+  const entry = { scope, rootDir: scope === 'workspace' ? rootDir : null, title: cleanTitle, registeredAt: Date.now() };
   return publishConversation(filePath, entry);
 }
 
 export function lookupConversation({ appData, sessionId }) {
   const filePath = indexPath(appData, sessionId);
   if (!fs.existsSync(filePath)) return null;
-  const entry = readJson(filePath);
-  if (typeof entry.rootDir !== 'string' || !entry.rootDir) return null;
-  return { rootDir: entry.rootDir, title: entry.title ?? '' };
+  return normalizeConversation(appData, readJson(filePath));
 }
 
 function workspaceKey(rootDir) {
@@ -169,15 +202,21 @@ function workspaceKey(rootDir) {
   return resolved;
 }
 
-export function listConversations({ appData, rootDir }) {
+export function listConversations({ appData, rootDir, scope = 'workspace' }) {
   const directory = path.join(appData, 'fons', 'conversations');
   if (!fs.existsSync(directory)) return [];
-  const workspace = workspaceKey(rootDir);
+  const workspace = scope === 'workspace' ? workspaceKey(rootDir) : null;
   return fs.readdirSync(directory).filter((name) => name.endsWith('.json'))
     .map((name) => ({ name, sessionId: name.slice(0, -5) }))
     .filter(({ sessionId }) => isValidSessionId(sessionId))
-    .map(({ name, sessionId }) => ({ sessionId, ...readJson(path.join(directory, name)) }))
-    .filter((entry) => typeof entry.rootDir === 'string' && workspaceKey(entry.rootDir) === workspace);
+    .map(({ name, sessionId }) => {
+      const entry = normalizeConversation(appData, readJson(path.join(directory, name)));
+      return entry ? { sessionId, ...entry } : null;
+    })
+    .filter((entry) => {
+      if (!entry || entry.scope !== scope) return false;
+      return scope === 'no-workspace' || workspaceKey(entry.rootDir) === workspace;
+    });
 }
 
 function detectEol(content) { return content.includes('\r\n') ? '\r\n' : '\n'; }
@@ -225,8 +264,8 @@ function fileEtag(filePath) {
   catch (error) { if (error.code === 'ENOENT') return '-'; throw error; }
 }
 
-export function readPoolData({ rootDir, sessionId }) {
-  const paths = sessionPaths({ rootDir, sessionId });
+export function readPoolData({ rootDir, fonsDir, sessionId }) {
+  const paths = sessionPaths({ rootDir, fonsDir, sessionId });
   const etag = [paths.ideas, paths.state, paths.ui, paths.archive].map(fileEtag).join('|');
   // Withdrawal metadata is published after deletion. Read it first so it can't revive a stale row.
   const ui = readJson(paths.ui);
@@ -309,8 +348,8 @@ export function stampPoolTimers(context) {
   stampExistingPoolTimers(context);
 }
 
-const stampExistingPoolTimers = poolWriter(({ rootDir, sessionId, freshTexts = [], now = Date.now() }) => {
-  const data = readPoolData({ rootDir, sessionId });
+const stampExistingPoolTimers = poolWriter(({ rootDir, fonsDir, sessionId, freshTexts = [], now = Date.now() }) => {
+  const data = readPoolData({ rootDir, fonsDir, sessionId });
   const buffering = data.items.filter((item) => item.status === 'buffering');
   const previous = JSON.stringify(data.ui.timers ?? null);
   if (!buffering.length && !data.ui.timers) return;
@@ -326,8 +365,8 @@ const stampExistingPoolTimers = poolWriter(({ rootDir, sessionId, freshTexts = [
   }
 });
 
-export function readPoolSnapshot({ rootDir, sessionId, debounceMs = resolveDebounceMs(), now = Date.now() }) {
-  const data = readPoolData({ rootDir, sessionId });
+export function readPoolSnapshot({ rootDir, fonsDir, sessionId, debounceMs = resolveDebounceMs(), now = Date.now() }) {
+  const data = readPoolData({ rootDir, fonsDir, sessionId });
   const timing = computeDebounce({ ...data, debounceMs, now });
   const items = data.items.map((item) => {
     const info = item.status === 'buffering' ? timing.byId.get(item.id) : null;
@@ -341,18 +380,18 @@ export function readPoolSnapshot({ rootDir, sessionId, debounceMs = resolveDebou
   };
 }
 
-export const addIdeas = poolWriter(({ rootDir, sessionId, texts }) => {
-  const paths = sessionPaths({ rootDir, sessionId });
+export const addIdeas = poolWriter(({ rootDir, fonsDir, sessionId, texts }) => {
+  const paths = sessionPaths({ rootDir, fonsDir, sessionId });
   const clean = texts.map((text) => String(text).replace(/[\r\n]+/g, ' ').trim().replace(/^[-*]\s*\[\s*\]\s*/, '').trim()).filter(Boolean);
   if (!clean.length) return { count: 0, texts: [] };
   appendLinesWithNewline(paths.ideas, clean.map((text) => `- [ ] ${text}`));
   return { count: clean.length, texts: clean };
 });
 
-export const completeIdea = poolWriter(({ rootDir, sessionId, token, tokens = [token] }) => {
+export const completeIdea = poolWriter(({ rootDir, fonsDir, sessionId, token, tokens = [token] }) => {
   if (!tokens.length) throw new Error('请先运行 fons list，再指定已处理条目的令牌。');
   if (new Set(tokens).size !== tokens.length) throw new Error('确认令牌重复。');
-  const data = readPoolData({ rootDir, sessionId });
+  const data = readPoolData({ rootDir, fonsDir, sessionId });
   const available = new Map(data.items.filter((row) => row.status !== 'done').map((row) => [row.token, row]));
   const selected = tokens.map((value) => available.get(value));
   if (selected.some((row) => !row)) {
@@ -416,8 +455,8 @@ function replaceIdea(data, item, next) {
   return { conflict: false };
 }
 
-export const updateIdeaText = poolWriter(({ rootDir, sessionId, rowIndex, expectedRaw, newText }) => {
-  const data = readPoolData({ rootDir, sessionId });
+export const updateIdeaText = poolWriter(({ rootDir, fonsDir, sessionId, rowIndex, expectedRaw, newText }) => {
+  const data = readPoolData({ rootDir, fonsDir, sessionId });
   const item = checkItem(data, rowIndex, expectedRaw);
   if (!item) return { conflict: true };
   if (item.status !== 'buffering') return { conflict: true, locked: true };
@@ -469,8 +508,8 @@ function publishRetraction(data, item, nextContent) {
   }
 }
 
-export const removeIdea = poolWriter(({ rootDir, sessionId, rowIndex, expectedRaw }) => {
-  const data = readPoolData({ rootDir, sessionId });
+export const removeIdea = poolWriter(({ rootDir, fonsDir, sessionId, rowIndex, expectedRaw }) => {
+  const data = readPoolData({ rootDir, fonsDir, sessionId });
   const item = checkItem(data, rowIndex, expectedRaw);
   if (!item) return { conflict: true };
   const nextContent = foldedRows(data, new Map([[rowIndex, '']]));
@@ -491,8 +530,8 @@ function invalidateCompletion({ paths, state, ui, rows, archive }, item) {
   writeJsonAtomic(paths.ui, ui);
 }
 
-export const reopenIdea = poolWriter(({ rootDir, sessionId, rowIndex, expectedRaw }) => {
-  const data = readPoolData({ rootDir, sessionId });
+export const reopenIdea = poolWriter(({ rootDir, fonsDir, sessionId, rowIndex, expectedRaw }) => {
+  const data = readPoolData({ rootDir, fonsDir, sessionId });
   const item = checkItem(data, rowIndex, expectedRaw);
   if (!item) return { conflict: true };
   if (item.status !== 'done') return { conflict: false };
@@ -509,8 +548,8 @@ export const reopenIdea = poolWriter(({ rootDir, sessionId, rowIndex, expectedRa
   return result;
 });
 
-export const holdEditing = poolWriter(({ rootDir, sessionId, id, now = Date.now() }) => {
-  const data = readPoolData({ rootDir, sessionId });
+export const holdEditing = poolWriter(({ rootDir, fonsDir, sessionId, id, now = Date.now() }) => {
+  const data = readPoolData({ rootDir, fonsDir, sessionId });
   const target = data.items.find((item) => item.id === id && item.status === 'buffering');
   if (!target) {
     if (data.ui.timers?.[id]) {
@@ -530,8 +569,8 @@ export const holdEditing = poolWriter(({ rootDir, sessionId, id, now = Date.now(
   return { editingHold: true, id, until: data.ui.timers[id].holdUntil };
 });
 
-export const releaseEditing = poolWriter(({ rootDir, sessionId, id, now = Date.now() }) => {
-  const data = readPoolData({ rootDir, sessionId });
+export const releaseEditing = poolWriter(({ rootDir, fonsDir, sessionId, id, now = Date.now() }) => {
+  const data = readPoolData({ rootDir, fonsDir, sessionId });
   const current = data.ui.timers?.[id];
   if (!current) return { editingHold: false };
   const target = data.items.find((item) => item.id === id && item.status === 'buffering');
@@ -776,7 +815,8 @@ function processStatus(pid) {
   catch (error) { return error.code === 'ESRCH' ? 'interrupted' : 'unknown'; }
 }
 
-export function getMigrationWarning({ rootDir }) {
+export function getMigrationWarning({ rootDir, scope }) {
+  if (scope === 'no-workspace' || !rootDir) return null;
   const lock = path.join(rootDir, '.agents', 'fons', '.migration.lock');
   if (!fs.existsSync(lock)) return null;
   let owner;
@@ -794,7 +834,8 @@ function releaseMigrationLock(context) {
   fs.rmdirSync(context.lock);
 }
 
-export function migrateLegacyInbox({ rootDir, sessionId }) {
+export function migrateLegacyInbox({ rootDir, scope, sessionId }) {
+  if (scope === 'no-workspace' || !rootDir) return { migrated: false };
   const fonsDir = sessionPaths({ rootDir, sessionId }).fonsDir;
   const legacy = migrationLegacyPaths(fonsDir);
   const lock = path.join(fonsDir, '.migration.lock');

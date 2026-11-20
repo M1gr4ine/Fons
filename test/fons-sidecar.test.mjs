@@ -228,6 +228,59 @@ test('a missing host data directory is distinguished from an unregistered conver
   assert.match(JSON.parse(response.body).error, /宿主数据目录/);
 });
 
+test('no-workspace and cross-project sessions enforce exact workspaceUris matching', async (t) => {
+  const ctx = await mounted(t);
+  const { registerConversation, noWorkspaceFonsDir } = await import('../scripts/fons-store.mjs');
+  const projectA = path.join(ctx.rootDir, 'project-a');
+  const projectASibling = path.join(ctx.rootDir, 'project-a-other');
+  const projectASub = path.join(projectA, 'packages', 'app');
+  const projectB = path.join(ctx.rootDir, 'project-b');
+  for (const dir of [projectASub, projectASibling, projectB]) fs.mkdirSync(dir, { recursive: true });
+  const uriA = pathToFileURL(projectA).href;
+  const uriASibling = pathToFileURL(projectASibling).href;
+  const uriB = pathToFileURL(projectB).href;
+
+  const SUB_SESSION = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  registerConversation({ appData: ctx.appData, sessionId: SESSION, scope: 'no-workspace', title: 'no-ws' });
+  registerConversation({ appData: ctx.appData, sessionId: OTHER, rootDir: projectA, title: 'proj-a' });
+  registerConversation({ appData: ctx.appData, sessionId: SUB_SESSION, rootDir: projectASub, title: 'proj-a-sub' });
+
+  // No-workspace session works with workspaceUris: []
+  const initial = await read(ctx, { conversationId: SESSION, workspaceUris: [] });
+  assert.equal(initial.registered, true);
+  assert.equal(initial.scope, 'no-workspace');
+  assert.equal(initial.migrationWarning, null);
+
+  await post(ctx, 'add', { conversationId: SESSION, workspaceUris: [], texts: ['独立思考'] });
+  const afterAdd = await read(ctx, { conversationId: SESSION, workspaceUris: [] });
+  assert.deepEqual(afterAdd.items.map((item) => item.text), ['独立思考']);
+  const noWsIdeas = path.join(noWorkspaceFonsDir(ctx.appData), `ideas-${SESSION}.md`);
+  assert.equal(fs.readFileSync(noWsIdeas, 'utf8'), '- [ ] 独立思考\n');
+  assert.equal(fs.existsSync(path.join(ctx.rootDir, '.agents')), false);
+
+  // No-workspace session rejects any open workspace URI
+  assert.deepEqual(await read(ctx, { conversationId: SESSION, workspaceUris: [uriA] }), { registered: true, scopeMismatch: true, scope: 'no-workspace' });
+  assert.equal((await post(ctx, 'add', { conversationId: SESSION, workspaceUris: [uriA], texts: ['blocked'] })).status, 409);
+
+  // Workspace session A rejects empty workspace, project B, sibling prefix dir, and malformed URIs
+  assert.deepEqual(await read(ctx, { conversationId: OTHER, workspaceUris: [] }), { registered: true, scopeMismatch: true, scope: 'workspace' });
+  assert.equal((await post(ctx, 'add', { conversationId: OTHER, workspaceUris: [], texts: ['blocked'] })).status, 409);
+  assert.deepEqual(await read(ctx, { conversationId: OTHER, workspaceUris: [uriB] }), { registered: true, scopeMismatch: true, scope: 'workspace' });
+  assert.equal((await post(ctx, 'add', { conversationId: OTHER, workspaceUris: [uriB], texts: ['blocked'] })).status, 409);
+  assert.deepEqual(await read(ctx, { conversationId: OTHER, workspaceUris: [uriASibling] }), { registered: true, scopeMismatch: true, scope: 'workspace' });
+  assert.deepEqual(await read(ctx, { conversationId: OTHER, workspaceUris: ['not-a-valid-uri'] }), { registered: true, scopeMismatch: true, scope: 'workspace' });
+
+  // Workspace session A matches its own URI, multi-root containing it, and parent root for subdir session
+  assert.equal((await post(ctx, 'add', { conversationId: OTHER, workspaceUris: [uriA], texts: ['项目 A 条目'] })).count, 1);
+  assert.deepEqual((await read(ctx, { conversationId: OTHER, workspaceUris: [uriB, uriA] })).items.map((item) => item.text), ['项目 A 条目']);
+  assert.equal((await read(ctx, { conversationId: SUB_SESSION, workspaceUris: [uriA] })).registered, true);
+  assert.equal((await read(ctx, { conversationId: SUB_SESSION, workspaceUris: [uriA] })).scopeMismatch, undefined);
+
+  // Malformed workspaceUris parameter returns 400
+  assert.equal((await read(ctx, { conversationId: SESSION, workspaceUris: 'not-an-array' })).status, 400);
+  assert.equal((await read(ctx, { conversationId: SESSION, workspaceUris: [123] })).status, 400);
+});
+
 const sdkDirectory = path.join(os.homedir(), '.gemini', 'antigravity', 'lib', 'node_modules', 'sidecar_sdk');
 const sdkIndex = path.join(sdkDirectory, 'index.mjs');
 const sdkLoader = path.join(sdkDirectory, 'register_loader.js');
@@ -237,13 +290,17 @@ const syntheticEnv = {
   ANTIGRAVITY_SIDECAR_WEB_PORT: '0',
 };
 
-test('entry point and ui-plugin junction bootstrap both fail closed when the host UI token is missing', { skip: !fs.existsSync(sdkLoader) }, (t) => {
+test('entry point, ui-plugin junction and fons-root.json copy bootstrap all fail closed when the host UI token is missing', { skip: !fs.existsSync(sdkLoader) }, (t) => {
   const { rootDir } = fixture(t);
   const linkedPlugin = path.join(rootDir, 'plugins', 'fons-pool');
   fs.mkdirSync(path.dirname(linkedPlugin), { recursive: true });
   fs.symlinkSync(path.resolve('ui-plugin'), linkedPlugin, process.platform === 'win32' ? 'junction' : 'dir');
+  const copiedPlugin = path.join(rootDir, 'plugins', 'fons-pool-copy');
+  fs.cpSync(path.resolve('ui-plugin'), copiedPlugin, { recursive: true });
+  fs.writeFileSync(path.join(copiedPlugin, 'fons-root.json'), JSON.stringify({ root: path.resolve('.') }), 'utf8');
   const bootstrapPath = path.join(linkedPlugin, 'sidecars', 'fons-pool', 'bootstrap.mjs');
-  for (const entry of [mainPath, bootstrapPath]) {
+  const copiedBootstrapPath = path.join(copiedPlugin, 'sidecars', 'fons-pool', 'bootstrap.mjs');
+  for (const entry of [mainPath, bootstrapPath, copiedBootstrapPath]) {
     const child = spawnSync(process.execPath, ['--import', pathToFileURL(sdkLoader).href, entry], {
       cwd: path.dirname(entry), env: syntheticEnv, encoding: 'utf8', timeout: 2000,
     });

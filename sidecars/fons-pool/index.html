@@ -491,7 +491,7 @@
         debounceMs: DEFAULT_DEBOUNCE_MS, heldId: null, holdSentAt: 0,
         composing: false, lastTypedAt: 0, flowMode: readSavedFlowMode(),
         loadedOnce: false, knownTokens: new Set(),
-        workspace: null, workspaceKey: null, boundWorkspaces: new Map(),
+        workspace: null, workspaceKey: null, workspaceUris: [], boundWorkspaces: new Map(),
       };
       let noticeTimer;
       const conversationId = () => window.sidecar?.conversationId || '';
@@ -585,19 +585,22 @@
         updateWaterLevels();
       }
 
+      function workspaceReady() {
+        return state.workspace === 'open' || state.workspace === 'empty';
+      }
+
       function bindWorkspace() {
-        if (state.workspace !== 'open' || !state.id || state.boundWorkspaces.has(state.id)) return;
+        if (!workspaceReady() || !state.id || state.boundWorkspaces.has(state.id)) return;
         state.boundWorkspaces.set(state.id, state.workspaceKey);
       }
 
       function workspaceMismatch() {
-        return state.workspace === 'open' && state.boundWorkspaces.has(state.id) && state.boundWorkspaces.get(state.id) !== state.workspaceKey;
+        return workspaceReady() && state.boundWorkspaces.has(state.id) && state.boundWorkspaces.get(state.id) !== state.workspaceKey;
       }
 
       function showContext() {
         if (state.workspace === 'unavailable') showEmpty('无法连接宿主，请在 Antigravity 中打开灵感池。');
         else if (state.workspace === null) showEmpty('正在等待宿主工作区信息…');
-        else if (state.workspace === 'empty') showEmpty('当前没有打开项目工作区，请先打开项目。');
         else if (!state.id) showEmpty('无法获取当前会话，请重新打开灵感池。');
         else if (workspaceMismatch()) showEmpty('工作区已更换，请切换到目标会话或重新打开灵感池。');
         else showEmpty('正在读取灵感池…');
@@ -607,7 +610,6 @@
         const next = conversationId();
         if (next === state.id) return;
         state.id = next;
-        bindWorkspace();
         resetPanel();
         showContext();
       }
@@ -615,9 +617,9 @@
       function workspaceChanged(uris) {
         const key = JSON.stringify([...uris].sort());
         if (key === state.workspaceKey) return;
+        state.workspaceUris = [...uris];
         state.workspaceKey = key;
         state.workspace = uris.length ? 'open' : 'empty';
-        bindWorkspace();
         resetPanel();
         syncSession();
         showContext();
@@ -642,19 +644,23 @@
         return response.json();
       }
 
+      function clearPoolRows() {
+        state.registered = false;
+        state.etag = '';
+        state.heldId = null;
+        state.holdSentAt = 0;
+        elements.rows.replaceChildren();
+        updateCount(0);
+        updateAvailability();
+        updateWaterLevels();
+      }
+
       function showFailure(error) {
         if (error.status === 401 || error.status === 403) resetPanel();
         else {
-          state.registered = false;
-          state.etag = '';
-          state.heldId = null;
-          state.holdSentAt = 0;
-          elements.rows.replaceChildren();
+          clearPoolRows();
           elements.warning.hidden = true;
-          updateCount(0);
           showNotice('');
-          updateAvailability();
-          updateWaterLevels();
         }
         showEmpty(error.message || '读取失败，请重试', 'error');
       }
@@ -806,7 +812,7 @@
           if (!payload) return null;
           result = await request(`/api/pool/${action}`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ conversationId: id, ...payload }),
+            body: JSON.stringify({ conversationId: id, workspaceUris: state.workspaceUris, ...payload }),
           });
           if (!current(id, epoch)) return null;
           if (result.locked) showNotice('已投递或已完成的灵感不支持编辑');
@@ -827,7 +833,7 @@
       function activeHeldNode() {
         if (!state.registered || document.hidden || workspaceMismatch()) return null;
         for (const node of elements.rows.children) {
-          if (node.item?.status === 'buffering' && (node.focused || node.dirty || node.saving)) return node;
+          if (!node.removing && node.item?.status === 'buffering' && (node.focused || node.dirty || node.saving)) return node;
         }
         return null;
       }
@@ -928,13 +934,22 @@
       }
 
       async function deleteRow(node) {
-        if (!validNode(node)) return;
-        const saved = await saveRow(node);
-        if (!saved || saved.conflict || !validNode(node)) return;
+        if (node.removing || !validNode(node)) return;
+        if (node.saving) {
+          const saved = await node.saving;
+          if (!saved || saved.conflict || !validNode(node)) return;
+        }
         if (node.item.status === 'delivered' && !window.confirm('模型已收到该条，将发送撤回通知')) return;
         if (!validNode(node)) return;
+        node.removing = true;
         if (state.heldId === node.item.id) { state.heldId = null; state.holdSentAt = 0; }
-        await mutate('remove', () => validNode(node) ? itemArguments(node) : null, node.conversation);
+        try {
+          await mutate('remove', () => validNode(node) ? itemArguments(node) : null, node.conversation, (result) => {
+            if (result.conflict) node.conflicted = true;
+          });
+        } finally {
+          node.removing = false;
+        }
         syncHold();
       }
 
@@ -974,29 +989,45 @@
         resize(input);
       }
 
-      function animateExit(node, mode) {
-        if (typeof node.animate !== 'function' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+      function prefersReducedMotion() {
+        return Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+      }
+
+      function animateExit(node, mode, box) {
+        if (!box?.height || typeof node.animate !== 'function' || prefersReducedMotion()) return;
         const host = elements.pool;
-        if (!host || typeof node.getBoundingClientRect !== 'function') return;
-        const box = node.getBoundingClientRect();
+        if (!host || typeof host.getBoundingClientRect !== 'function') return;
         const base = host.getBoundingClientRect();
-        if (!box.height) return;
         const ghost = node.cloneNode(true);
         ghost.className = 'row ghost';
+        delete ghost.dataset.testid;
+        delete ghost.dataset.fresh;
+        delete ghost.dataset.holding;
+        ghost.setAttribute('aria-hidden', 'true');
+        ghost.querySelector('textarea').value = node.querySelector('textarea').value;
+        ghost.querySelector('input').checked = node.querySelector('input').checked;
         ghost.style.top = `${box.top - base.top}px`;
         ghost.style.left = `${box.left - base.left}px`;
         ghost.style.width = `${box.width}px`;
+        ghost.style.height = `${box.height}px`;
         host.append(ghost);
-        const shift = mode === 'up' ? -10 : 4;
-        ghost.animate([
-          { opacity: 1, transform: 'translateY(0) scale(1)' },
-          { opacity: 0, transform: `translateY(${shift}px) scale(0.98)` },
-        ], { duration: 170, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }).onfinish = () => ghost.remove?.();
+        const target = mode === 'up'
+          ? 'translateY(-10px) scale(0.98)'
+          : mode === 'remove'
+            ? 'translateX(14px) scale(0.97)'
+            : 'translateY(4px) scale(0.98)';
+        const anim = ghost.animate([
+          { opacity: 1, transform: 'translate(0, 0) scale(1)' },
+          { opacity: 0, transform: target },
+        ], { duration: mode === 'remove' ? 200 : 170, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'forwards' });
+        const cleanup = () => ghost.remove?.();
+        anim.onfinish = cleanup;
+        anim.oncancel = cleanup;
       }
 
-      function detachRow(node) {
-        const mode = node.item?.status === 'done' ? 'up' : 'fade';
-        animateExit(node, mode);
+      function detachRow(node, box) {
+        const mode = node.removing ? 'remove' : (node.item?.status === 'done' ? 'up' : 'fade');
+        animateExit(node, mode, box);
         if (typeof node.remove === 'function') node.remove();
         else {
           const index = elements.rows.children.indexOf(node);
@@ -1080,66 +1111,113 @@
         node.conflicted = false;
       }
 
-      function isProtectedRow(node, active) {
-        if (node.item?.status !== 'buffering') return false;
-        return Boolean(node === active || node.focused || node.dirty || node.saving);
+      function activeEditingRow() {
+        const active = document.activeElement;
+        const row = active?.closest?.('.row');
+        return row && active === row.querySelector('textarea') ? row : null;
       }
 
-      function pruneDetachedRows(keep, protectedRows) {
-        for (const node of [...elements.rows.children]) {
-          if (!keep.has(node) && (node.conflicted || !protectedRows.includes(node))) detachRow(node);
+      function isProtectedRow(node, editingRow) {
+        if (node.removing || node.item?.status !== 'buffering') return false;
+        return Boolean(node === editingRow || node.focused || node.dirty || node.saving);
+      }
+
+      function measureRowTops(nodes) {
+        if (prefersReducedMotion()) return null;
+        const tops = new Map();
+        for (const node of nodes) {
+          if (typeof node.getBoundingClientRect === 'function' && typeof node.animate === 'function') {
+            tops.set(node, node.getBoundingClientRect().top);
+          }
+        }
+        return tops.size ? tops : null;
+      }
+
+      function animateRowShifts(previousTops, kept) {
+        if (!previousTops) return;
+        for (const node of kept) {
+          const oldTop = previousTops.get(node);
+          if (oldTop === undefined) continue;
+          node.flipAnim?.cancel?.();
+          const deltaY = oldTop - node.getBoundingClientRect().top;
+          if (Math.abs(deltaY) < 1) continue;
+          const anim = node.animate([
+            { transform: `translateY(${deltaY}px)` },
+            { transform: 'translateY(0)' },
+          ], { duration: 180, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
+          node.flipAnim = anim;
+          const clear = () => { if (node.flipAnim === anim) node.flipAnim = null; };
+          anim.onfinish = clear;
+          anim.oncancel = clear;
         }
       }
 
       function reconcile(items) {
         const active = document.activeElement?.closest?.('.row');
+        const editingRow = activeEditingRow();
         const nodes = [...elements.rows.children];
         const existing = new Map(nodes.map((node) => [node.dataset.token, node]));
-        const protectedRows = nodes.filter((node) => isProtectedRow(node, active));
+        const protectedRows = nodes.filter((node) => isProtectedRow(node, editingRow));
         const keep = new Set();
-        let position = 0;
+        const plan = [];
         for (const item of items) {
           const protectedNode = protectedRows.find((node) => node.item.rowIndex === item.rowIndex);
           if (protectedNode && protectedNode.dataset.token !== item.token) {
-            refreshActiveRow(protectedNode, item);
             keep.add(protectedNode);
-            position += 1;
+            plan.push({ node: protectedNode, item, protected: true });
             continue;
           }
           const node = existing.get(item.token) || createRow(item);
-          updateRow(node, item);
           keep.add(node);
-          const anchor = elements.rows.children[position];
-          if (node !== active && !node.focused && node !== anchor) elements.rows.insertBefore(node, anchor || null);
-          resize(node.querySelector('textarea'));
+          plan.push({ node, item, protected: false });
+        }
+        const toDetach = nodes.filter((node) => !keep.has(node) && (node.conflicted || !protectedRows.includes(node)));
+        const detachBoxes = toDetach.length
+          ? new Map(toDetach.map((node) => [node, typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null]))
+          : null;
+        const previousTops = toDetach.length ? measureRowTops(nodes.filter((node) => keep.has(node))) : null;
+        for (const node of toDetach) detachRow(node, detachBoxes.get(node));
+        let position = 0;
+        for (const entry of plan) {
+          const { node, item } = entry;
+          if (entry.protected) {
+            refreshActiveRow(node, item);
+          } else {
+            updateRow(node, item);
+            const anchor = elements.rows.children[position];
+            if (node !== active && !node.focused && node !== anchor) elements.rows.insertBefore(node, anchor || null);
+            resize(node.querySelector('textarea'));
+          }
           position += 1;
         }
-        pruneDetachedRows(keep, protectedRows);
+        animateRowShifts(previousTops, keep);
         state.knownTokens = new Set(items.map((item) => item.token));
         state.loadedOnce = true;
       }
 
       function applySnapshot(data) {
-        state.registered = data.registered;
-        updateAvailability();
         updateWarning(data.migrationWarning);
-        if (!data.registered) {
-          elements.rows.replaceChildren();
-          state.etag = '';
-          state.heldId = null;
-          state.holdSentAt = 0;
-          updateCount(0);
-          showEmpty('当前会话尚未登记，请确认项目已挂载 Fons；旧会话请新开会话或参照 README 登记。');
-          updateWaterLevels();
+        if (!data.registered || data.scopeMismatch) {
+          clearPoolRows();
+          if (data.scopeMismatch) {
+            showEmpty('当前会话与工作区状态不匹配，请切换到目标会话或重新打开灵感池。');
+          } else if (state.workspace === 'empty') {
+            showEmpty('当前无工作区会话尚未登记，请确认全局灵感池插件（fons-pool）已启用；旧会话请新开会话。');
+          } else {
+            showEmpty('当前会话尚未登记，请确认项目已挂载 Fons；旧会话请新开会话或参照 README 登记。');
+          }
           return;
         }
-        elements.empty.hidden = data.items.length > 0;
-        if (!data.items.length) showEmpty('还没有灵感，随时记一条。', 'idle');
+        state.registered = true;
+        bindWorkspace();
+        updateAvailability();
+        if (data.items.length > 0) elements.empty.hidden = true;
         state.etag = data.etag;
         state.debounceMs = data.debounceMs || DEFAULT_DEBOUNCE_MS;
         updateCount(data.items.filter((item) => item.status !== 'done').length);
         elements.archive.disabled = !data.canArchive;
         reconcile(data.items);
+        if (!data.items.length) showEmpty('还没有灵感，随时记一条。', 'idle');
         updateWaterLevels();
       }
 
@@ -1148,7 +1226,7 @@
       }
 
       function canPoll() {
-        if (document.hidden || state.workspace !== 'open' || workspaceMismatch()) return false;
+        if (document.hidden || !workspaceReady() || workspaceMismatch()) return false;
         if (!state.id || state.polling || state.busy) return false;
         return state.refreshNeeded || !state.loadedOnce || !typingActive();
       }
@@ -1161,7 +1239,7 @@
         const ticket = { id, epoch };
         state.polling = ticket;
         state.refreshNeeded = false;
-        const payload = { conversationId: id };
+        const payload = { conversationId: id, workspaceUris: state.workspaceUris };
         if (state.etag) payload.etag = state.etag;
         try {
           const data = await request('/api/pool', {

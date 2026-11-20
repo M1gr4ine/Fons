@@ -278,3 +278,50 @@ test('ambiguous candidate output renders the registration time as a readable dat
   assert.equal(result.status, 2);
   assert.match(result.stderr, /1970-01-01/);
 });
+
+test('CLI supports no-workspace sessions via -s and --no-workspace without leaking into workspace lookups', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fons-cli-nows-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const appData = path.join(root, 'host');
+  const indexDir = path.join(appData, 'fons', 'conversations');
+  fs.mkdirSync(indexDir, { recursive: true });
+  fs.writeFileSync(path.join(indexDir, `${A}.json`), JSON.stringify({ scope: 'no-workspace', rootDir: null, title: '自由问答', registeredAt: 1 }));
+
+  // Normal workspace lookup never falls back to no-workspace sessions
+  const implicit = run(root, ['list']);
+  assert.notEqual(implicit.status, 0);
+  assert.match(implicit.stderr, /开启会话/);
+
+  // Explicit --no-workspace / -n and -s operate on <appData>/fons/no-workspace
+  const added = run(root, ['--no-workspace', '无工作区灵感一']);
+  assert.equal(added.status, 0, added.stderr);
+  assert.equal(fs.existsSync(path.join(root, '.agents')), false);
+  const noWsIdeas = path.join(appData, 'fons', 'no-workspace', `ideas-${A}.md`);
+  assert.equal(fs.readFileSync(noWsIdeas, 'utf8'), '- [ ] 无工作区灵感一\n');
+
+  const listed = run(root, ['-s', A, 'list']);
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.match(listed.stdout, /无工作区灵感一/);
+  const token = /\[([0-9]+-[a-f0-9]{64})\]/.exec(listed.stdout)[1];
+
+  // Explicit -n overrides FONS_SESSION
+  const completed = run(root, ['-n', 'done', token], [], { FONS_SESSION: B });
+  assert.equal(completed.status, 0, completed.stderr);
+  const archived = run(root, ['--no-workspace', 'archive']);
+  assert.equal(archived.status, 0, archived.stderr);
+  assert.equal(fs.existsSync(noWsIdeas), false);
+  assert.match(fs.readFileSync(path.join(appData, 'fons', 'no-workspace', 'archive', `${A}.md`), 'utf8'), /无工作区灵感一/);
+
+  // Mutual exclusion between -s and --no-workspace
+  const conflict = run(root, ['-s', A, '--no-workspace', 'list']);
+  assert.notEqual(conflict.status, 0);
+  assert.match(conflict.stderr, /不能同时指定/);
+
+  // Multiple no-workspace sessions require -s
+  fs.writeFileSync(path.join(indexDir, `${B}.json`), JSON.stringify({ scope: 'no-workspace', rootDir: null, title: '第二自由会话', registeredAt: 2 }));
+  const ambiguous = run(root, ['--no-workspace', 'list']);
+  assert.equal(ambiguous.status, 2);
+  assert.match(ambiguous.stderr, /第二自由会话/);
+  assert.match(ambiguous.stderr, new RegExp(A));
+  assert.match(ambiguous.stderr, new RegExp(B));
+});

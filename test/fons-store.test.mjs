@@ -834,3 +834,55 @@ test('default debounce is 45 seconds and per-item editing hold freezes only the 
   assert.equal(afterLeaseExpiry.editingHold, false);
   assert.equal(afterLeaseExpiry.remainingMs, 20000);
 });
+
+test('no-workspace conversations isolate from workspaces, support full pool CRUD via fonsDir, and skip migrations', (t) => {
+  const ctx = fixture(t);
+  const appData = path.join(ctx.rootDir, 'host');
+  const legacyId = '33333333-3333-4333-8333-333333333333';
+  const indexDir = path.join(appData, 'fons', 'conversations');
+  fs.mkdirSync(indexDir, { recursive: true });
+  fs.writeFileSync(path.join(indexDir, `${legacyId}.json`), JSON.stringify({ rootDir: ctx.rootDir, title: 'legacy', registeredAt: 1 }));
+
+  store.registerConversation({ appData, sessionId: A, scope: 'no-workspace', title: '自由讨论' });
+  store.registerConversation({ appData, sessionId: B, rootDir: ctx.rootDir, title: '项目会话' });
+
+  const noWs = store.lookupConversation({ appData, sessionId: A });
+  assert.equal(noWs.scope, 'no-workspace');
+  assert.equal(noWs.rootDir, null);
+  assert.equal(noWs.fonsDir, store.noWorkspaceFonsDir(appData));
+  assert.equal(noWs.title, '自由讨论');
+
+  const wsEntry = store.lookupConversation({ appData, sessionId: B });
+  assert.equal(wsEntry.scope, 'workspace');
+  assert.equal(wsEntry.rootDir, ctx.rootDir);
+  assert.equal(wsEntry.fonsDir, path.join(ctx.rootDir, '.agents', 'fons'));
+
+  const legacyEntry = store.lookupConversation({ appData, sessionId: legacyId });
+  assert.equal(legacyEntry.scope, 'workspace');
+  assert.equal(legacyEntry.rootDir, ctx.rootDir);
+
+  assert.deepEqual(store.listConversations({ appData, scope: 'no-workspace' }).map((e) => e.sessionId), [A]);
+  assert.deepEqual(store.listConversations({ appData, rootDir: ctx.rootDir }).map((e) => e.sessionId).sort(), [B, legacyId]);
+
+  const noWsCtx = { scope: 'no-workspace', rootDir: null, fonsDir: noWs.fonsDir, sessionId: A };
+  store.addIdeas({ ...noWsCtx, texts: ['草稿一', '草稿二'] });
+  const first = store.readPoolSnapshot(noWsCtx).items[0];
+  assert.equal(store.updateIdeaText({ ...noWsCtx, rowIndex: first.rowIndex, expectedRaw: first.raw, newText: '改写一' }).conflict, false);
+  const edited = store.readPoolSnapshot(noWsCtx).items[0];
+  assert.equal(store.holdEditing({ ...noWsCtx, id: edited.id }).editingHold, true);
+  assert.equal(store.releaseEditing({ ...noWsCtx, id: edited.id }).editingHold, false);
+  store.completeIdea({ ...noWsCtx, token: edited.token });
+  const done = store.readPoolSnapshot(noWsCtx).items[0];
+  assert.equal(done.status, 'done');
+  assert.equal(store.reopenIdea({ ...noWsCtx, rowIndex: done.rowIndex, expectedRaw: done.raw }).conflict, false);
+  const reopened = store.readPoolSnapshot(noWsCtx).items[0];
+  store.completeIdea({ ...noWsCtx, token: reopened.token });
+  assert.equal(store.archiveCompleted(noWsCtx).count, 1);
+
+  const second = store.readPoolSnapshot(noWsCtx).items[0];
+  assert.equal(store.removeIdea({ ...noWsCtx, rowIndex: second.rowIndex, expectedRaw: second.raw }).conflict, false);
+  assert.equal(fs.existsSync(path.join(ctx.rootDir, '.agents')), false);
+  assert.match(fs.readFileSync(path.join(noWs.fonsDir, 'archive', `${A}.md`), 'utf8'), /改写一/);
+  assert.equal(store.getMigrationWarning(noWsCtx), null);
+  assert.deepEqual(store.migrateLegacyInbox(noWsCtx), { migrated: false });
+});
