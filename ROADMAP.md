@@ -40,11 +40,11 @@
 
 ---
 
-## 4. 支持无工作区会话（方案待定）
+## 4. 【已完成】支持无工作区会话
 
 - **现状问题**：
-  - 当前 Hook 入口（`scripts/fons-hook.mjs`）在会话没有工作区（`workspacePaths` 为空或缺少有效 `rootDir`）时会直接跳过处理，且收件箱与账本文件默认存放在 `<workspace>/.agents/fons/` 下，导致无工作区会话无法登记，Fons 侧栏面板、CLI 与自动投递均无法使用。
-- **演进目标**：
-  - 改造后让无工作区会话也能正常使用 Fons（灵感池录入、缓冲投递、收尾核对与面板交互）。
-- **状态说明**：
-  - 具体落盘目录、会话登记与面板/CLI 发现机制等实现方案尚未确定，待后续细化设计。
+  - 原先 Hook 入口（`scripts/fons-hook.mjs`）在会话没有工作区（`workspacePaths` 为空或缺少有效 `rootDir`）时会直接跳过处理，且收件箱与账本文件默认存放在 `<workspace>/.agents/fons/` 下，导致无工作区会话无法登记，Fons 侧栏面板、CLI 与自动投递均无法使用。
+- **落地实现**：
+  - **双包作用域互斥**：全局 `ui-plugin` 新增无工作区专属 Hook（`node scripts/bootstrap-hook.mjs`，强制 `--scope=no-workspace` 并与 Hook 共用宿主目录解析），根目录工作区 Hook 限定 `--scope=workspace`，二者天然互斥、零污染普通项目；
+  - **统一落盘与索引**：无工作区会话数据存放在 `<appData>/fons/no-workspace/`（与 `<workspace>/.agents/fons/` 同构），索引增加 `scope: "no-workspace"` 并兼容旧工作区索引；
+  - **按需首次极简协议与防串台**：无工作区 `PreInvocation` 仅在同会话首次投递时附带极简 `[FONS_ACK: 编号]` 回执提示，后续投递只留 `[FONS]` 与条目；Sidecar 与面板核对 `workspaceUris` 与会话登记的 `scope`/`rootDir` 一致性（覆盖无工作区与多项目间切换），CLI 新增 `-n` / `--no-workspace` 支持。

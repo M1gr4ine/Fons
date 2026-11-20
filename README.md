@@ -1,205 +1,172 @@
 <p align="center">
-  <img src="assets/logo.svg" width="96" height="96" alt="Fons · 思如泉涌">
+  <img src="assets/logo.svg" width="96" height="96" alt="Fons · 灵感池">
 </p>
 
-# Fons · 思如泉涌
+<h1 align="center">Fons · 灵感池</h1>
 
-Fons 为 Antigravity 提供按会话隔离的灵感蓄水池。非紧急补充先记入收件箱，每条灵感独立蓄水消抖，到期后在下一次模型调用时合并投递；紧急纠偏或叫停仍直接使用聊天框或停止按钮。
+<p align="center">
+  <strong>面向 Antigravity 的会话级旁路灵感蓄水池</strong><br>
+  边看 AI 写代码边随手记下补充想法——不憋着忘掉，也不中途插话打断模型心流。
+</p>
 
-## <img src="assets/sidebar-icon.svg" width="20" height="20" align="absmiddle" alt=""> 使用灵感池
+---
 
-在会话右侧点击 **+ → Extensions → 灵感池**，面板自动绑定当前会话。No Project 会话只显示打开项目的提示；在已挂载 Fons 的项目会话中可以录入。底部速记行按 Enter 添加，粘贴多行时按非空行拆分；中文输入法选词时不会提交。
+## 解决什么问题
 
-条目分为待投递、已投递和已完成：
-- **待投递**：每条各自独立 `45s` 蓄水涨水位（顶栏可在「`↑ 水位` 自下而上」与「`→ 水位` 自左向右」之间切换），点进某条二次编辑时仅暂缓该条自身的计时，不影响其他已蓄满条目按时投递；修改保存后该条重新蓄水。
-- **已投递与已完成**：文本锁定只读不可直接改写。「归档」收拢并整理已完成条目。删除已投递条目时会先确认，下一次模型调用将收到一次撤回通知。即使删除的是最后一条，待发通知也会保留到送达。撤回后再写入相同文字会重新投递。如果同一次调用包含两条消息，模型先读到撤回，再读到标有“重新添加”的新条目；旧的确认编号随上一轮投递失效。
+当 AI 正在跨文件修改代码时，脑子里常会顺带冒出一些**不紧急但不想漏掉**的补充：
 
-无论处于读写模式还是只读 Plan 模式，模型处理完补充事项后，只需在回复最末行输出 `[FONS_ACK: 编号]`。`Stop` Hook 按本轮投递编号自动为对应行写入 `【√】 ` 前缀。收件箱文件只读时，Hook 将确认记入会话账本。
+- “导出接口顺便补上 `created_at` 字段”
+- “分页超限时返回 400 并给上限提示”
+- “改完记得补一组权限单测”
 
-### 工作区文件
+直接发聊天消息容易打断当前上下文节奏，忍着等这轮结束又容易忘。**Fons 把“随时记录”和“合适时机投递”拆开：**
 
-每个会话使用 UUID 作为文件名的一部分，首次添加灵感时创建收件箱。
+- **非紧急补充 → 丢进灵感池**：每条灵感独立蓄水缓冲（默认 `45s`），期间随时改写或删掉；到期后在下一次模型调用时静默合并注入，本轮收尾前也会自动兜底。
+- **紧急叫停 / 立刻纠偏 → 照旧用聊天框或停止按钮**。
 
-```text
-<workspace>/.agents/fons/
-├── ideas-<conversationId>.md       本会话收件箱
-├── .state-<conversationId>.json    Hook 的投递和确认账本
-├── .ui-<conversationId>.json       面板和 CLI 的操作记录
-└── archive/
-    └── <conversationId>.md         本会话归档
+## 能干什么
+
+- **单条独立蓄水消抖**：每条灵感各自计时涨水位，新增条目不会重置旧草稿；点击编辑某条时仅暂缓该条自身计时，保存后重新蓄水。
+- **三态清晰、支持撤回与归档**：待投递（可编辑）→ 已投递（文本锁定，删除时向模型发撤回通知）→ 已完成（一键归档收拢）。
+- **无感自动勾选，零额外工具轮次**：模型处理完后只需在回复末行输出 `[FONS_ACK: 编号]`，由 `Stop` Hook 自动回写 `【√】 ` 前缀；读写模式与只读 Plan 模式均可闭环。
+- **多入口互通**：侧栏「灵感池」面板、终端 CLI（`fons`）、直接编辑 Markdown 收件箱三种方式同步生效。
+- **按会话隔离**：每个会话拥有独立收件箱、状态账本与归档，多任务并行互不干扰。
+
+## 实机截图
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="assets/screenshot-dark.png" alt="深色主题 · 自下而上水位与编辑暂缓" width="100%"><br>
+      <sub>深色主题 · <code>↑ 水位</code> 自下而上（含蓄水中 / 编辑暂缓 / 已投递 / 已完成）</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="assets/screenshot-light.png" alt="浅色主题 · 自左向右水位推进" width="100%"><br>
+      <sub>浅色主题 · <code>→ 水位</code> 自左向右水位推进</sub>
+    </td>
+  </tr>
+</table>
+
+> 状态圆点说明：虚线圆圈 = **待投递（蓄水中）**，点击可直接标为完成；实心点圆圈 = **已投递（模型已收到）**；蓝底对勾 = **已完成**，点击可重新打开。
+
+## 工作原理与架构
+
+```mermaid
+flowchart LR
+  Input["面板 / CLI / Markdown"] --> Inbox["会话收件箱
+.agents/fons"]
+  Inbox --> Pre["PreInvocation Hook
+独立蓄水 · 合并注入 · 撤回"]
+  Pre --> Model["Antigravity 模型
+回复末行输出 FONS_ACK"]
+  Model --> Stop["Stop Hook
+自动勾选 · 漏项兜底"]
+  Stop --> Inbox
 ```
 
-收件箱也可在编辑器中直接打开，每行一条。空行和 `#` 开头的标题或注释会被忽略。
+- **`SessionStart`**：登记当前会话与工作区（或无工作区作用域）的绑定关系；空箱时启动脚本自动短路，无额外开销。
+- **`PreInvocation`**：将蓄水到期的条目和待发撤回合并注入下一次模型调用；无工作区会话仅在首次投递时附带极简 `[FONS_ACK: 编号]` 回执提示，后续投递只留 `[FONS]` 与真实条目。
+- **`Stop`**：读取模型回复末行的 `[FONS_ACK: ...]` 并自动回写 `【√】 `；若有漏处理或本轮末未暂缓的待投递条目，自动兜底续跑（最多 2 次）。
+
+有工作区会话的数据存放在目标工作区的 `.agents/fons/` 下，无工作区会话（No Project）存放在宿主数据目录 `<appData>/fons/no-workspace/` 下，均可直接在编辑器中按行编辑 `ideas-<conversationId>.md`（空行与 `#` 注释自动忽略）：
 
 ```markdown
 # 本轮补充灵感
 导出接口补充 created_at 字段
-- [ ] 增加导出权限校验
-【√】 已完成的条目
+【√】 统一错误码映射表中的空值校验提示
 ```
 
-完成条目的标准前缀是 `【√】 `，也兼容 `- [√]`、`[√]`、`✓`、`- [x]` 和 `- [X]`。面板和 CLI 使用追加回执或受检查的行编辑，保留其他条目。
+## 快速开始
 
-## 安装与挂载
+### 1. 安装与挂载（Windows）
 
-推荐将 Hook 挂在目标工作区，并将纯 UI 面板包 `ui-plugin` 挂到全局 `plugins` 目录（这样侧边栏标签页会自动显示专属水珠图标，且不含全局 Hook，不会污染其他项目）。将示例中的 `F:\Fons` 换成实际仓库路径，在目标工作区运行以下 PowerShell 命令：
+推荐**在目标工作区挂载插件本体（工作区 Hook + Rules）**，并**将全局包 `ui-plugin` 挂到全局 `plugins` 目录**——侧边栏标签页会自动显示专属水珠图标，并附带仅作用于无工作区会话的 Hook（不会干预或污染任何项目工作区）。
+
+将示例中的 `F:\Fons` 替换为实际仓库路径，在目标工作区执行：
 
 ```powershell
+# 1) 在当前项目挂载 Fons（工作区 Hook + Rules）
 New-Item -ItemType Directory -Force .agents\plugins | Out-Null
 cmd /c mklink /J .agents\plugins\fons F:\Fons
 
-# 若此前挂载过旧的独立 sidecars\fons-pool，请先移除避免菜单重复
+# 2) 从旧版迁移：移除旧独立 sidecars\fons-pool 与旧全局 plugins\fons，避免菜单重复或旧全局 Hook 干扰普通项目
 $oldSidecar = Join-Path $env:USERPROFILE '.gemini\config\sidecars\fons-pool'
 if (Test-Path -LiteralPath $oldSidecar) { cmd /c rmdir "$oldSidecar" }
-
 $pluginsDir = Join-Path $env:USERPROFILE '.gemini\config\plugins'
-New-Item -ItemType Directory -Force $pluginsDir | Out-Null
-cmd /c mklink /J "$pluginsDir\fons-pool" "F:\Fons\ui-plugin"
-```
-
-挂载后可在 Antigravity 的 Customizations 页面确认「灵感池」已启用，并从会话右侧 **+ → Extensions → 灵感池** 打开面板（侧边栏标签将显示专属图标）。
-
-不要把仓库根目录 `F:\Fons` 直接联接到 `~/.gemini/config/plugins/fons`。根目录包含 `hooks.json`，全局挂载会使 Hook 在所有工作区生效并可能与工作区挂载重复执行；而 `ui-plugin` 仅包含面板与图标配置。工作区联接方式支持空箱时的启动脚本短路。
-
-也可在目标项目 `.agents/plugins.json` 中引用仓库的父目录，Antigravity 会按一层子目录扫描。此方式不满足工作区联接的短路前提。
-
-```json
-{
-  "entries": [
-    {
-      "path": "F:/",
-      "include_only": ["Fons"]
-    }
-  ]
-}
-```
-
-仓库的 `hooks.json` 默认使用 Windows 入口。Unix / macOS 需要赋予 `scripts/run-hook.sh` 和 `bin/fons` 执行权限，并将三个事件的命令改为对应的 `./scripts/run-hook.sh SessionStart`、`./scripts/run-hook.sh PreInvocation` 和 `./scripts/run-hook.sh Stop`。
-
-### Hook 事件
-
-- `SessionStart` 登记本会话与工作区的对应关系，空箱时也登记。宿主明确报告工作区列表为空时，Hook 跳过登记和投递。
-- `PreInvocation` 在首次需要时补登记旧会话，消抖后投递当前会话的未处理条目，并发送待发撤回。
-- `Stop` 核对本会话尚未确认的条目，最多续跑两次。
-
-没有非空收件箱或待发撤回时，工作区启动脚本会短路。索引保存在宿主数据目录下的 `fons/conversations/<conversationId>.json`，供面板和 CLI 找到对应工作区。
-
-升级前已打开且尚未登记的会话，如果整个工作区都是空箱，单独发送聊天消息仍会走短路。可以新开会话立即登记，也可以在编辑器里创建本会话的 `ideas-<conversationId>.md`、写入第一条灵感，再发消息触发补登记。
-
-## CLI
-
-可将 `bin/` 加入 `PATH`，也可直接使用 `bin\fons.cmd`。在目标工作区运行，或从其子目录运行。
-
-```powershell
-fons "导出接口补充 created_at 字段"
-fons list
-fons done $token1
-fons done $token1 $token2
-fons archive
-fons -s $sessionId list
-fons --session $sessionId "另一条灵感"
-```
-
-示例中的 `$token1`、`$token2` 和 `$sessionId` 请替换为实际令牌与会话 UUID。`list` 显示未完成条目和确认令牌，`done` 整批检查所给令牌后追加回执。若条目或它之前的内容已变化，旧令牌可能失效，可重新运行 `list` 获取。`archive` 将已完成条目移入本会话归档；操作期间请保存并暂停编辑收件箱。
-
-没有显式会话 ID 时，CLI 向上寻找包含 `.agents` 或 `.git` 的工作区，并在索引中查找对应会话。恰好一个时自动选择，多个时列出 ID、标题和登记时间并要求使用 `-s`，没有时提示先在 Antigravity 中开启会话。`FONS_ROOT` 可覆盖用于查找候选的工作区。`-s`、`--session` 或 `FONS_SESSION` 指定的会话必须已登记，显式参数优先于环境变量；实际读写路径始终来自该会话的索引。
-
-| 环境变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| `FONS_DEBOUNCE_SEC` | `45` | 每条待投递灵感的独立蓄水秒数，`0` 表示不等待 |
-| `FONS_SESSION` | 未设置 | 指定已登记的会话 UUID |
-| `FONS_ROOT` | 从当前目录向上查找 | 未指定会话时用于查找工作区候选 |
-| `FONS_APP_DATA` | `~/.gemini/antigravity` | CLI 使用的宿主数据目录，索引位于其 `fons/conversations` 下 |
-
-每条待投递灵感各自独立计时，新增条目不会刷新先前草稿的进度；在面板中点进某条待投递灵感二次编辑时，仅暂缓该条自身计时，改写保存后该条重新计时。已投递和已完成条目不可直接编辑文本。
-
-## 旧数据迁移
-
-Hook 检测到旧的 `.agents/fons/ideas.md` 时，会将已投递条目和账本按会话拆分；从未投递的条目归入首先触发迁移的会话。旧 `archive.md` 留在 `archive/legacy.md`，旧 `.state.json` 留在 `.state.legacy.json`。若目标会话已有冲突数据，迁移会保留旧数据并停止，需先处理冲突。
-
-只有 Hook 执行迁移。CLI 遇到旧箱会提示在 Antigravity 中触发 Hook。迁移锁残留时，面板和 CLI 会提示；各会话自己的新收件箱仍可使用，旧箱留待恢复。
-
-### 中断后的手动恢复
-
-迁移会创建 `.agents/fons/.migration.lock`。正常完成或成功回滚后锁会移除；进程中断或回滚失败时会保留现场。先停止涉及该工作区的 Hook、面板、CLI 和编辑器写入，保持现场不变。确认迁移进程已结束后，再备份并核对。不要仅凭 PID 判断锁已失效，PID 可能被系统复用；无法确认时保留锁并继续核查。
-
-以下命令在目标工作区的 PowerShell 中只读取锁记录和进程信息。
-
-```powershell
-$fonsDir = Join-Path (Get-Location).Path '.agents\fons'
-$lockDir = Join-Path $fonsDir '.migration.lock'
-$ownerPath = Join-Path $lockDir 'owner.json'
-$migrationOwner = Get-Content -LiteralPath $ownerPath -Raw | ConvertFrom-Json
-$migrationOwner | Format-List pid, startedAt, step, source, targets
-[DateTimeOffset]::FromUnixTimeMilliseconds([long]$migrationOwner.startedAt).ToLocalTime()
-Get-Process -Id ([int]$migrationOwner.pid) -ErrorAction SilentlyContinue |
-  Select-Object Id, ProcessName, StartTime
-```
-
-`startedAt` 是 Unix 毫秒时间戳，`source` 和 `targets` 中的路径相对于 `.agents/fons`。强杀还可能留下锁目录中的 `state-staging.json` 或其 `.tmp-*` 文件；应连同锁一起备份，不要用暂存文件覆盖会话账本。如果 `owner.json` 缺失或损坏，保留整个现场，人工检查旧箱、账本、归档和各会话文件，不要自动清锁或覆盖文件。
-
-确认已停写后，将整个 `.agents/fons` 复制到该目录之外的新备份目录，并核对备份完整。下面的示例创建一个独立目录，不覆盖原文件。
-
-```powershell
-$backupBase = Join-Path $env:USERPROFILE ("Documents\Fons-recovery-" + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $backupBase | Out-Null
-Copy-Item -LiteralPath $fonsDir -Destination $backupBase -Recurse -Force
-```
-
-检查 `source` 列出的旧箱 `ideas`、被认领的 `claimed`、旧账本 `state` 和旧归档 `archive`，以及对应的 `stateBackup` 和 `archiveBackup`。核对每个路径是否存在和内容是否一致。源与备份可能同时存在，不能只按文件名猜测归属。
-
-对 `targets` 中每个已存在的 `ideas` 和 `state` 文件，分别计算 SHA-256 并与同一项的 `ideasHash`、`stateHash` 比较。以下命令只读取，不会移动文件。
-
-```powershell
-foreach ($target in $migrationOwner.targets) {
-  foreach ($kind in @('ideas', 'state')) {
-    $relativePath = $target.$kind
-    $expectedHash = $target.($kind + 'Hash')
-    $targetPath = Join-Path $fonsDir $relativePath
-    $actualHash = if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
-      (Get-FileHash -LiteralPath $targetPath -Algorithm SHA256).Hash
-    } else { $null }
-    [pscustomobject]@{
-      Path = $relativePath
-      Expected = $expectedHash
-      Actual = $actualHash
-      Matches = $null -ne $actualHash -and $actualHash -eq $expectedHash
-    }
+$oldGlobalPlugin = Join-Path $pluginsDir 'fons'
+if (Test-Path -LiteralPath $oldGlobalPlugin) {
+  if ((Get-Item -LiteralPath $oldGlobalPlugin).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    cmd /c rmdir "$oldGlobalPlugin"
+  } else {
+    Remove-Item -LiteralPath $oldGlobalPlugin -Recurse -Force
   }
 }
+
+# 3) 全局安装 UI 面板 + 无工作区 Hook（真实目录 + fons-root.json 指向仓库；Windows 下 plugins 目录不识别 Junction）
+New-Item -ItemType Directory -Force $pluginsDir | Out-Null
+$globalUiPlugin = Join-Path $pluginsDir 'fons-pool'
+if (Test-Path -LiteralPath $globalUiPlugin) {
+  if ((Get-Item -LiteralPath $globalUiPlugin).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    cmd /c rmdir "$globalUiPlugin"
+  } else {
+    Remove-Item -LiteralPath $globalUiPlugin -Recurse -Force
+  }
+}
+Copy-Item -LiteralPath 'F:\Fons\ui-plugin' -Destination $globalUiPlugin -Recurse -Force
+@{ root = 'F:\Fons' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $globalUiPlugin 'fons-root.json') -Encoding utf8
 ```
 
-`step` 记录下一步或正在进行的步骤，文件可能已完成，也可能尚未出现。
+> **注意**：请勿把仓库根目录 `F:\Fons` 直接放到 `~/.gemini/config/plugins/`，否则根目录工作区 `hooks.json` 会在所有工作区生效或与工作区挂载重复执行；全局 `fons-pool` 需以真实目录形式安装并通过 `fons-root.json` 指向本地仓库（Windows 下 Antigravity 插件扫描会跳过 `~/.gemini/config/plugins/` 中的 Junction）。旧版若曾全局安装 `plugins\fons`，请按上述步骤 2 移除后重启 Antigravity 并新开无工作区会话。
+>
+> **Unix / macOS**：全局 `ui-plugin/hooks.json` 直接调用 `node scripts/bootstrap-hook.mjs`，无需修改；工作区挂载需为 `scripts/run-hook.sh` 和 `bin/fons` 赋予执行权限，并将根目录 `hooks.json` 中三个事件的命令改为 `./scripts/run-hook.sh SessionStart|PreInvocation|Stop`。
 
-| 步骤 | 核对重点 |
-| --- | --- |
-| `claiming`、`planning` | 旧箱可能仍在原处，也可能已成为 `claimed`；发布清单可能尚为空 |
-| `publishing` | 只有部分目标可能已发布，逐项核对清单和哈希 |
-| `moving-archive`、`moving-state` | 旧源和对应 legacy 副本可能同时存在，逐对核对 |
-| `finalizing` | 目标可能已全部发布，旧箱可能已移除；确认全部结果后可保留完成结果 |
-| `rollback-failed` | 可能已有部分回滚，结合所有源和目标的实际内容判断 |
+### 2. 打开 <img src="assets/sidebar-icon.svg" width="18" height="18" align="absmiddle" alt=""> 灵感池面板
 
-若准备恢复旧箱后重试，只有在确认文件属于本次迁移且哈希与清单完全一致时，才将已发布目标逐个**移动到备份目录中的独立位置**，不要盲删或覆盖备份。哈希不符、来源不明，或迁移后已被新会话修改的文件留在原处，先人工比对并合并；不得丢弃各会话的新数据。
+在 Antigravity 会话右侧点击 **+ → Extensions → 灵感池**：
 
-对旧箱、旧账本和旧归档，只有原路径不存在时才从确认对应的 `claimed` 或 legacy 副本复制回原路径；原路径已存在时先比对，内容不同则保留两份并人工合并。若确认 legacy 副本是本次部分迁移产生的，在恢复原文件并核对后，把该副本移入备份的独立位置，避免重试时目标名冲突。恢复并核对旧箱后，也将对应的 `claimed` 副本移入备份的独立位置。保留原有的其他归档及所有未列入迁移清单的会话文件。
+- 底部速记框按 **Enter** 入池，粘贴多行自动按非空行拆分，中文输入法选词时不误提交；
+- 顶栏可一键切换 **「↑ 水位 / → 水位」** 蓄水方向，或点击 **「归档」** 收拢已完成条目；
+- 面板自动绑定当前会话（支持已挂载 Fons 的项目工作区会话，以及启用全局 `fons-pool` 后的无工作区会话）。
 
-确认全部数据已保全、冲突已解决后，将 `.migration.lock` 整个移入备份目录，随后在 Antigravity 中触发 Hook 重试。若已核实 `finalizing` 的迁移结果完整，可保留结果并移走锁，无需再次导入旧箱；不要同时保留会被再次迁移的旧 `ideas.md`。有任何归属或内容无法确定时保留现场，先完成核对。
+## CLI 与常用配置
 
-## 已知限制
+将 `bin/` 加入 `PATH`（或直接运行 `bin\fons.cmd`），在目标工作区或其子目录下使用（无工作区会话使用 `-n` / `--no-workspace` 或 `-s <sessionId>`）：
 
-1. 消抖到期只在下一次模型调用时生效，空闲会话不会被唤醒；本轮收尾（`Stop`）会自动兜底未处于编辑暂缓中的待投递条目。
-2. Hook、面板和 CLI 对同一会话的写入会串行执行。外部编辑器直接保存 Markdown 时，请避开同一会话的自动勾选和面板、CLI 写入，以免相互覆盖。
-3. 在编辑器中直接修改前序行会改变后续行令牌，已追加的回执可能失配，对应条目重新显示为待办。面板和 CLI 的行编辑会折叠回执以规避这一问题。
-4. 宿主中删除会话后，相应 `ideas-<id>.md` 不会自动清理，需要手动归档或删除。
+```powershell
+fons "导出接口补充 created_at 字段"   # 添加一条灵感
+fons list                             # 查看未完成条目与确认令牌
+fons done <token1> [token2...]        # 手动标记完成
+fons archive                          # 归档已完成条目
+fons -s <sessionId> list              # 多会话时显式指定会话 UUID
+fons --no-workspace "无工作区补充"     # 操作无工作区会话（简写 -n）
+```
 
-## 对比验证
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `FONS_DEBOUNCE_SEC` | `45` | 每条待投递灵感的独立蓄水秒数，`0` 表示不等待 |
+| `FONS_SESSION` | 未设置 | 指定已登记的会话 UUID（`-s` / `--session` / `-n` 优先） |
+| `FONS_ROOT` | 向上自动查找 | 未指定会话时用于定位工作区 |
+| `FONS_APP_DATA` | `~/.gemini/antigravity` | 宿主数据目录（索引在 `fons/conversations`，无工作区数据在 `fons/no-workspace`） |
 
-可以在两个复杂度相近的编码任务中比较直接插话与使用灵感池。分别观察原任务是否完整、补充项在何时处理、是否产生返工，以及所有补充得到确认后 `Stop` 是否正常结束。
+## 注意事项
 
-## 测试
+- 消抖到期在下一次模型调用时投递，不会主动唤醒空闲会话；本轮结束时 `Stop` Hook 会自动兜底未处于编辑暂缓中的条目。
+- 面板、CLI 与 Hook 对同一会话的写入会自动串行化；在外部编辑器直接修改 `ideas-<id>.md` 时请避开并发写入。
+- 宿主中删除会话后，对应 `ideas-<id>.md` 不会自动清理，可按需手动归档或删除。
 
-项目使用 Node 内置测试运行器，无需额外安装测试依赖。
+<details>
+<summary>旧版单文件收件箱迁移说明</summary>
+
+检测到旧版 `.agents/fons/ideas.md` 时，Hook 会自动按会话拆分并保留旧副本（`archive/legacy.md`、`.state.legacy.json`）。若迁移意外中断导致 `.agents/fons/.migration.lock` 残留，请先停止该工作区的相关写入、备份整个 `.agents/fons` 目录，并核对锁目录下的 `owner.json` 与对应文件后再清理锁文件重试；已隔离的新会话收件箱不受影响。
+
+</details>
+
+## 测试与演进
+
+项目使用 Node 内置测试运行器，零外部依赖：
 
 ```sh
 node --test
 ```
+
+后续规划（支持截图/文件附件、Codex 多宿主适配等）见 [ROADMAP.md](ROADMAP.md)。

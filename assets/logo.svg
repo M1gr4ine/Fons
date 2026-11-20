@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 256 256" fill="none">
-  <title>Fons · 思如泉涌</title>
+  <title>Fons · 灵感池</title>
   <defs>
     <linearGradient id="fons-bg" x1="36" y1="24" x2="220" y2="232" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#0F2438"/>
@@ -8,24 +8,24 @@
     </linearGradient>
     <linearGradient id="fons-rim" x1="28" y1="24" x2="228" y2="232" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#5EEAD4" stop-opacity="0.72"/>
-      <stop offset="50%" stop-color="#38BDF8" stop-opacity="0.32"/>
-      <stop offset="100%" stop-color="#F59E0B" stop-opacity="0.45"/>
+      <stop offset="50%" stop-color="#38BDF8" stop-opacity="0.34"/>
+      <stop offset="100%" stop-color="#0EA5E9" stop-opacity="0.52"/>
     </linearGradient>
-    <linearGradient id="fons-wave-back" x1="128" y1="132" x2="128" y2="232" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#0EA5E9" stop-opacity="0.42"/>
-      <stop offset="100%" stop-color="#0284C7" stop-opacity="0.75"/>
+    <linearGradient id="fons-wave-back" x1="128" y1="130" x2="128" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0EA5E9" stop-opacity="0.44"/>
+      <stop offset="100%" stop-color="#0284C7" stop-opacity="0.76"/>
     </linearGradient>
-    <linearGradient id="fons-wave-front" x1="128" y1="146" x2="128" y2="236" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#2DD4BF" stop-opacity="0.78"/>
-      <stop offset="48%" stop-color="#0EA5E9" stop-opacity="0.86"/>
+    <linearGradient id="fons-wave-front" x1="128" y1="144" x2="128" y2="236" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#2DD4BF" stop-opacity="0.8"/>
+      <stop offset="48%" stop-color="#0EA5E9" stop-opacity="0.88"/>
       <stop offset="100%" stop-color="#0369A1" stop-opacity="0.96"/>
     </linearGradient>
-    <linearGradient id="fons-drop" x1="112" y1="68" x2="146" y2="138" gradientUnits="userSpaceOnUse">
+    <linearGradient id="fons-drop" x1="108" y1="52" x2="150" y2="144" gradientUnits="userSpaceOnUse">
       <stop offset="0%" stop-color="#A5F3FC"/>
       <stop offset="45%" stop-color="#38BDF8"/>
       <stop offset="100%" stop-color="#14B8A6"/>
     </linearGradient>
-    <radialGradient id="fons-glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(128 112) rotate(90) scale(86 86)">
+    <radialGradient id="fons-glow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(128 106) rotate(90) scale(90 90)">
       <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.34"/>
       <stop offset="100%" stop-color="#38BDF8" stop-opacity="0"/>
     </radialGradient>
@@ -36,29 +36,24 @@
 
   <!-- Outer Vessel -->
   <rect x="24" y="24" width="208" height="208" rx="52" fill="url(#fons-bg)"/>
-  <circle cx="128" cy="112" r="86" fill="url(#fons-glow)"/>
+  <circle cx="128" cy="106" r="90" fill="url(#fons-glow)"/>
 
-  <!-- Rising Water Level Inside Vessel -->
+  <!-- Rising Water Level Inside Pool -->
   <g clip-path="url(#fons-vessel)">
-    <path d="M16 148 C58 134, 96 160, 138 146 C176 133, 210 149, 244 140 L244 240 L16 240 Z" fill="url(#fons-wave-back)"/>
-    <path d="M16 162 C62 176, 102 146, 146 158 C184 168, 214 152, 244 158 L244 240 L16 240 Z" fill="url(#fons-wave-front)"/>
+    <path d="M16 146 C58 132, 96 158, 138 144 C176 131, 210 147, 244 138 L244 240 L16 240 Z" fill="url(#fons-wave-back)"/>
+    <path d="M16 160 C62 174, 102 144, 146 156 C184 166, 214 150, 244 156 L244 240 L16 240 Z" fill="url(#fons-wave-front)"/>
     <!-- Luminous Meniscus Waterline -->
-    <path d="M20 162 C62 176, 102 146, 146 158 C184 168, 214 152, 240 158" stroke="#A5F3FC" stroke-width="2.4" stroke-opacity="0.78" stroke-linecap="round"/>
+    <path d="M20 160 C62 174, 102 144, 146 156 C184 166, 214 150, 240 156" stroke="#A5F3FC" stroke-width="2.4" stroke-opacity="0.78" stroke-linecap="round"/>
 
     <!-- Spring Ripples -->
-    <ellipse cx="128" cy="174" rx="46" ry="11" stroke="#E0F2FE" stroke-width="1.8" stroke-opacity="0.42" stroke-dasharray="5 5"/>
-    <ellipse cx="128" cy="174" rx="25" ry="6.2" stroke="#F0FDFA" stroke-width="2" stroke-opacity="0.72"/>
+    <ellipse cx="128" cy="176" rx="48" ry="11.5" stroke="#E0F2FE" stroke-width="1.8" stroke-opacity="0.44" stroke-dasharray="5 5"/>
+    <ellipse cx="128" cy="176" rx="26" ry="6.4" stroke="#F0FDFA" stroke-width="2" stroke-opacity="0.74"/>
   </g>
 
-  <!-- Ascending Fountain Droplet -->
-  <path d="M128 68 C128 68 99 103 99 123.5 C99 139.5 112 152.5 128 152.5 C144 152.5 157 139.5 157 123.5 C157 103 128 68 128 68 Z" fill="url(#fons-drop)"/>
+  <!-- Fountain Droplet -->
+  <path d="M128 52 C128 52 95 92 95 113 C95 131.2 109.8 146 128 146 C146.2 146 161 131.2 161 113 C161 92 128 52 128 52 Z" fill="url(#fons-drop)"/>
   <!-- Specular Highlight on Droplet -->
-  <path d="M113 117 C113 108 119 97 124 90" stroke="#ECFEFF" stroke-width="3.6" stroke-linecap="round" stroke-opacity="0.82"/>
-
-  <!-- Rising Idea Sparks (Amber & Cyan) -->
-  <circle cx="128" cy="49" r="5.5" fill="#FBBF24"/>
-  <circle cx="158" cy="64" r="3.6" fill="#5EEAD4" fill-opacity="0.9"/>
-  <circle cx="99" cy="70" r="3" fill="#7DD3FC" fill-opacity="0.82"/>
+  <path d="M110.5 110 C110.5 99 117.5 85.5 123.5 76.5" stroke="#ECFEFF" stroke-width="3.8" stroke-linecap="round" stroke-opacity="0.84"/>
 
   <!-- Crisp Inner Bevel Rim -->
   <rect x="25.25" y="25.25" width="205.5" height="205.5" rx="50.75" stroke="url(#fons-rim)" stroke-width="2.5"/>
