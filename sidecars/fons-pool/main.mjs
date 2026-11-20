@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { isValidStoredName } from '../../scripts/fons-inbox.mjs';
 import {
   MAX_ATTACHMENT_BYTES, MAX_ITEM_ATTACHMENTS, addIdeas, archiveCompleted, completeIdea,
-  findAppData, getMigrationWarning, holdEditing, isValidSessionId, lookupConversation,
+  findAppData, holdEditing, isValidSessionId, lookupConversation,
   readAttachment, readPoolSnapshot, releaseEditing, removeIdea, reopenIdea, stampPoolTimers,
   updateIdeaText,
 } from '../../scripts/fons-store.mjs';
@@ -68,11 +68,8 @@ function freshTimerTexts(result) {
 function readPool(context, { etag: previous }) {
   stampPoolTimers(context);
   const snapshot = readPoolSnapshot(context);
-  const warning = getMigrationWarning(context);
-  const etag = warning ? snapshot.etag + '|' + warning.status : snapshot.etag;
-  if (previous === etag) return { unchanged: true, etag };
-  const migrationWarning = warning ? { status: warning.status, message: warning.message } : null;
-  return { ...snapshot, registered: true, scope: context.scope, migrationWarning, etag };
+  if (previous === snapshot.etag) return { unchanged: true, etag: snapshot.etag };
+  return { ...snapshot, registered: true, scope: context.scope };
 }
 
 function canonicalPath(dir) {
@@ -135,31 +132,69 @@ function mutate(operation, fields) {
   };
 }
 
-function boundHandler(appData, action) {
+function validWorkspaceUris(workspaceUris) {
+  return workspaceUris === undefined || (Array.isArray(workspaceUris) && workspaceUris.every((uri) => typeof uri === 'string'));
+}
+
+function sessionContextError(action, entry, workspaceUris) {
+  if (!entry) {
+    return action === readPool ? { registered: false } : jsonError(404, '当前会话尚未由 Fons Hook 登记。');
+  }
+  if (!hasWorkspaceMismatch(entry, workspaceUris)) return null;
+  return action === readPool
+    ? { registered: true, scopeMismatch: true, scope: entry.scope }
+    : jsonError(409, '当前会话与工作区状态不匹配。');
+}
+
+function sessionHandler(appData, action) {
   return (data = {}) => {
     const sessionId = data.conversationId;
     if (!isValidSessionId(sessionId)) return jsonError(400, '无效的会话 ID。');
-    if (data.workspaceUris !== undefined && (!Array.isArray(data.workspaceUris) || !data.workspaceUris.every((s) => typeof s === 'string'))) {
-      return jsonError(400, '无效参数：workspaceUris');
-    }
+    if (!validWorkspaceUris(data.workspaceUris)) return jsonError(400, '无效参数：workspaceUris');
     if (!appData) return jsonError(503, '无法定位宿主数据目录。');
     const entry = lookupConversation({ appData, sessionId });
-    if (!entry) return action === readPool ? { registered: false } : jsonError(404, '当前会话尚未由 Fons Hook 登记。');
-    if (hasWorkspaceMismatch(entry, data.workspaceUris)) {
-      return action === readPool
-        ? { registered: true, scopeMismatch: true, scope: entry.scope }
-        : jsonError(409, '当前会话与工作区状态不匹配。');
-    }
+    const rejected = sessionContextError(action, entry, data.workspaceUris);
+    if (rejected) return rejected;
     return action({ scope: entry.scope, rootDir: entry.rootDir, fonsDir: entry.fonsDir, sessionId }, data);
   };
 }
 
-export function mountPoolRoutes(app, appData) {
+function bindSession(appData, boundSession) {
+  if (!appData || !boundSession || !isValidSessionId(boundSession.sessionId)) {
+    throw new Error('缺少已登记的 Fons 会话。');
+  }
+  const { sessionId, scope, rootDir, host } = boundSession;
+  const entry = lookupConversation({ appData, sessionId });
+  if (!entry || entry.scope !== scope || (host && entry.host !== host)) {
+    throw new Error('Fons 会话与登记不匹配。');
+  }
+  if (scope === 'workspace' && (typeof rootDir !== 'string' || canonicalPath(rootDir) !== canonicalPath(entry.rootDir))) {
+    throw new Error('Fons 会话的工作区与登记不匹配。');
+  }
+  return { sessionId, scope: entry.scope, rootDir: entry.rootDir, fonsDir: entry.fonsDir };
+}
+
+function boundHandler(context, action) {
+  return (data = {}) => {
+    if (data.conversationId !== undefined && data.conversationId !== context.sessionId) {
+      return jsonError(403, '当前面板未绑定此会话。');
+    }
+    if (!validWorkspaceUris(data.workspaceUris)) return jsonError(400, '无效参数：workspaceUris');
+    if (hasWorkspaceMismatch(context, data.workspaceUris)) return jsonError(409, '当前会话与工作区状态不匹配。');
+    return action(context, data);
+  };
+}
+
+export function mountPoolRoutes(app, appData, options) {
+  const bound = options === undefined ? null : bindSession(appData, options.boundSession);
+  const handlerFor = bound
+    ? (action) => boundHandler(bound, action)
+    : (action) => sessionHandler(appData, action);
   app.page('/', () => fs.readFileSync(page, 'utf8'));
-  app.api('/api/pool', boundHandler(appData, readPool), 'POST');
-  app.api('/api/pool/attachment', boundHandler(appData, readAttachmentRoute), 'POST');
+  app.api('/api/pool', handlerFor(readPool), 'POST');
+  app.api('/api/pool/attachment', handlerFor(readAttachmentRoute), 'POST');
   for (const [name, [operation, fields]] of Object.entries(operations)) {
-    app.api('/api/pool/' + name, boundHandler(appData, mutate(operation, fields)), 'POST');
+    app.api('/api/pool/' + name, handlerFor(mutate(operation, fields)), 'POST');
   }
 }
 

@@ -7,6 +7,20 @@
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cpath d='M12 3.2C12 3.2 8.75 7.1 8.75 9.55a3.25 3.25 0 0 0 6.5 0C15.25 7.1 12 3.2 12 3.2Z' fill='%2338BDF8' fill-opacity='.25' stroke='%230EA5E9' stroke-width='1.8'/%3E%3Cpath d='M5.6 15.3c1.9-1.2 4.2 1.2 6.4 0 2.2-1.2 4.5 1.2 6.4 0' stroke='%2314B8A6' stroke-width='1.7' stroke-linecap='round'/%3E%3Cpath d='M4.25 13.25C4.25 17.55 7.7 20.75 12 20.75s7.75-3.2 7.75-7.5' stroke='%230EA5E9' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E">
   <script src="/preload.js"></script>
   <style>
+    @layer defaults {
+      :root {
+        color-scheme: light dark;
+        --background: light-dark(#fafaf9, #191c21);
+        --foreground: light-dark(#202328, #ebedf0);
+        --font-family: system-ui, -apple-system, sans-serif;
+        --primary: light-dark(#036b93, #62cdf4);
+        --border: light-dark(#d6dade, #414750);
+        --muted: light-dark(#edf0f3, #272d35);
+        --muted-foreground: light-dark(#545e69, #aab4c2);
+        --error: light-dark(#b42335, #ff8792);
+      }
+    }
+
     * { box-sizing: border-box; }
     html, body { width: 100%; height: 100%; margin: 0; }
     body {
@@ -111,17 +125,10 @@
     .flow-toggle:hover { color: var(--foreground); }
 
     /* Banners */
-    .warning, .notice {
+    .notice {
       font-size: 12px;
       padding: 6px 12px;
       overflow-wrap: anywhere;
-    }
-    .warning {
-      color: var(--error);
-      background: color-mix(in srgb, var(--error) 8%, transparent);
-      border-bottom: 1px solid color-mix(in srgb, var(--error) 22%, var(--border));
-    }
-    .notice {
       color: var(--muted-foreground);
       background: var(--surface-hover);
       border-bottom: 1px solid var(--border);
@@ -215,7 +222,7 @@
       opacity: 0;
       transform: scaleY(0);
       transform-origin: center bottom;
-      transition: transform 2s linear, opacity 220ms ease, background 220ms ease;
+      transition: transform 1s linear, opacity 220ms ease, background 220ms ease;
     }
     .pool[data-flow="up"] .row[data-status="buffering"] .row-water {
       opacity: 1;
@@ -738,7 +745,6 @@
       <button type="button" class="flow-toggle" data-testid="fons-flow-mode">↑ 水位</button>
       <button type="button" data-testid="fons-archive" title="收拢并归档已完成灵感">归档</button>
     </header>
-    <div class="warning" role="status" hidden></div>
     <div class="notice" role="status" aria-live="polite" hidden></div>
     <div class="list" role="list">
       <div class="empty-art" aria-hidden="true">
@@ -780,6 +786,8 @@
       const DEFAULT_DEBOUNCE_MS = 45000;
       const HOLD_RENEW_MS = 5000;
       const TYPING_QUIET_MS = 1200;
+      const TIMER_TICK_MS = 1000;
+      const POLL_INTERVAL_MS = 2000;
       const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
       const MAX_ITEM_ATTACHMENTS = 8;
       const IMAGE_EXT_RE = /\.(?:png|jpe?g|webp|gif|svg)$/i;
@@ -794,7 +802,7 @@
         quickSubmit: $('[data-testid="fons-quick-submit"]'), dropBanner: $('[data-testid="fons-drop-banner"]'),
         lightbox: $('[data-testid="fons-lightbox"]'),
         flowMode: $('[data-testid="fons-flow-mode"]'), archive: $('[data-testid="fons-archive"]'),
-        warning: $('.warning'), notice: $('.notice'), count: $('.pool-count'),
+        notice: $('.notice'), count: $('.pool-count'),
       };
       const state = {
         id: null, session: 0, epoch: 0, etag: '', registered: false, busy: false,
@@ -803,6 +811,7 @@
         composing: false, lastTypedAt: 0, flowMode: readSavedFlowMode(),
         loadedOnce: false, knownTokens: new Set(),
         workspace: null, workspaceKey: null, workspaceUris: [], boundWorkspaces: new Map(),
+        workspaceRevision: undefined,
         draftAttachments: [], draftSeq: 0, draftPrepTail: Promise.resolve(), draftPrepPending: 0,
         submitAwaitingPrep: false, thumbUrls: new Map(), thumbInflight: new Map(),
         revocableUrls: new Set(), dragDepth: 0, dropRow: null,
@@ -958,7 +967,6 @@
         elements.rows.replaceChildren();
         elements.quick.value = '';
         resize(elements.quick);
-        elements.warning.hidden = true;
         updateCount(0);
         showNotice('');
         updateAvailability();
@@ -979,7 +987,8 @@
       }
 
       function showContext() {
-        if (state.workspace === 'unavailable') showEmpty('无法连接宿主，请在 Antigravity 中打开灵感池。');
+        if (window.sidecar?.contextMessage) showEmpty(window.sidecar.contextMessage);
+        else if (state.workspace === 'unavailable') showEmpty('无法连接宿主，请在 Antigravity 中打开灵感池。');
         else if (state.workspace === null) showEmpty('正在等待宿主工作区信息…');
         else if (!state.id) showEmpty('无法获取当前会话，请重新打开灵感池。');
         else if (workspaceMismatch()) showEmpty('工作区已更换，请切换到目标会话或重新打开灵感池。');
@@ -994,9 +1003,10 @@
         showContext();
       }
 
-      function workspaceChanged(uris) {
+      function workspaceChanged(uris, revision) {
         const key = JSON.stringify([...uris].sort());
-        if (key === state.workspaceKey) return;
+        if (key === state.workspaceKey && revision === state.workspaceRevision) return;
+        state.workspaceRevision = revision;
         state.workspaceUris = [...uris];
         state.workspaceKey = key;
         state.workspace = uris.length ? 'open' : 'empty';
@@ -1039,7 +1049,6 @@
         if (error.status === 401 || error.status === 403) resetPanel();
         else {
           clearPoolRows();
-          elements.warning.hidden = true;
           showNotice('');
         }
         showEmpty(error.message || '读取失败，请重试', 'error');
@@ -1094,11 +1103,6 @@
           else if (rowState === 'buffering' && phase === 'idle') phase = 'buffering';
         }
         if (elements.pool) elements.pool.dataset.phase = phase;
-      }
-
-      function updateWarning(warning) {
-        elements.warning.textContent = warning?.message || '';
-        elements.warning.hidden = !warning?.message;
       }
 
       function rowLabel(status) {
@@ -1962,7 +1966,6 @@
       }
 
       function applySnapshot(data) {
-        updateWarning(data.migrationWarning);
         if (!data.registered || data.scopeMismatch) {
           clearPoolRows();
           if (data.scopeMismatch) {
@@ -2224,7 +2227,7 @@
       });
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) syncHold();
-        else void poll();
+        else { updateWaterLevels(); void poll(); }
       });
       if (!nativeAutoSize && typeof ResizeObserver !== 'undefined') {
         const observer = new ResizeObserver(() => {
@@ -2233,7 +2236,8 @@
         observer.observe(document.querySelector('.pool'));
       }
       applyFlowMode(state.flowMode);
-      setInterval(() => { syncSession(); updateWaterLevels(); syncHold(); void poll(); }, 2000);
+      setInterval(() => { if (!document.hidden) updateWaterLevels(); }, TIMER_TICK_MS);
+      setInterval(() => { syncSession(); syncHold(); void poll(); }, POLL_INTERVAL_MS);
       syncSession();
       if (typeof window.sidecar?.onWorkspaceChange === 'function' && typeof window.sidecar?.fetch === 'function') {
         window.sidecar.onWorkspaceChange(workspaceChanged);

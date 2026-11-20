@@ -96,7 +96,6 @@ test('etag reports unchanged snapshots and changes after a write', async (t) => 
   await register(ctx);
   const first = await read(ctx);
   assert.ok(first.etag);
-  assert.equal(first.migrationWarning, null);
   assert.deepEqual(await read(ctx, { etag: first.etag }), { unchanged: true, etag: first.etag });
   await post(ctx, 'add', { texts: ['new'] });
   const next = await read(ctx, { etag: first.etag });
@@ -148,23 +147,6 @@ test('a stale row update surfaces conflict and leaves the current text intact', 
   assert.equal(conflict.conflict, true);
   assert.deepEqual((await read(ctx)).items.map((item) => item.text), ['new']);
 });
-
-test('a retained migration lock is visible even with an unchanged data etag and new items remain usable', async (t) => {
-  const ctx = await mounted(t);
-  await register(ctx);
-  const before = await read(ctx);
-  const lock = path.join(ctx.rootDir, '.agents', 'fons', '.migration.lock');
-  fs.mkdirSync(lock, { recursive: true });
-  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: 99999999, startedAt: 1, step: 'publishing' }));
-  const warned = await read(ctx, { etag: before.etag });
-  assert.equal(warned.migrationWarning.status, 'interrupted');
-  await post(ctx, 'add', { texts: ['new item'] });
-  const after = await read(ctx);
-  assert.equal(after.migrationWarning.status, 'interrupted');
-  assert.deepEqual(after.items.map((item) => item.text), ['new item']);
-  assert.equal(fs.existsSync(lock), true);
-});
-
 
 test('mutation routes reject malformed payloads without changing the inbox', async (t) => {
   const ctx = await mounted(t);
@@ -249,7 +231,6 @@ test('no-workspace and cross-project sessions enforce exact workspaceUris matchi
   const initial = await read(ctx, { conversationId: SESSION, workspaceUris: [] });
   assert.equal(initial.registered, true);
   assert.equal(initial.scope, 'no-workspace');
-  assert.equal(initial.migrationWarning, null);
 
   await post(ctx, 'add', { conversationId: SESSION, workspaceUris: [], texts: ['独立思考'] });
   const afterAdd = await read(ctx, { conversationId: SESSION, workspaceUris: [] });

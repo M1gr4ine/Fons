@@ -31,13 +31,13 @@ function deferred() {
   return { promise, resolve };
 }
 
-function harness({ host = true, secureFetch = true } = {}) {
+function harness({ host = true, secureFetch = true, now } = {}) {
   const elements = new Map();
   for (const selector of [
     '.rows', '.empty', '[data-testid="fons-quick-add"]', '[data-testid="fons-quick-box"]',
     '[data-testid="fons-quick-drafts"]', '[data-testid="fons-attach"]', '[data-testid="fons-file-input"]',
     '[data-testid="fons-quick-submit"]', '[data-testid="fons-drop-banner"]', '[data-testid="fons-lightbox"]',
-    '[data-testid="fons-flow-mode"]', '[data-testid="fons-archive"]', '.warning', '.notice', '.pool',
+    '[data-testid="fons-flow-mode"]', '[data-testid="fons-archive"]', '.notice', '.pool',
   ]) elements.set(selector, new Element());
   const lightbox = elements.get('[data-testid="fons-lightbox"]');
   lightbox.hidden = true;
@@ -49,7 +49,7 @@ function harness({ host = true, secureFetch = true } = {}) {
   const docListeners = {};
   const requests = [];
   let workspaceChange;
-  let tick;
+  const intervals = [];
   const storage = new Map();
   const localStorage = {
     getItem(key) { return storage.has(key) ? storage.get(key) : null; },
@@ -59,8 +59,11 @@ function harness({ host = true, secureFetch = true } = {}) {
   if (host) sidecar.onWorkspaceChange = (callback) => { workspaceChange = callback; return () => {}; };
   if (!secureFetch) delete sidecar.fetch;
   const document = { hidden: false, activeElement: null, listeners: docListeners, querySelector: (selector) => elements.get(selector), querySelectorAll: () => [], createElement(tag) { const el = new Element(); el.tag = tag; return el; }, addEventListener(name, cb) { docListeners[name] = cb; } };
-  vm.runInNewContext(script, { window: { sidecar, localStorage }, document, location: { search: '' }, URLSearchParams, Promise, Date, Buffer, Uint8Array, Array, setTimeout: () => 0, clearTimeout() {}, setInterval: (callback) => { tick = callback; }, queueMicrotask, fetch: sidecar.fetch });
-  return { elements, requests, sidecar, storage, document, workspace: (value) => workspaceChange(value), tick };
+  const Clock = now ? { now } : Date;
+  vm.runInNewContext(script, { window: { sidecar, localStorage }, document, location: { search: '' }, URLSearchParams, Promise, Date: Clock, Buffer, Uint8Array, Array, setTimeout: () => 0, clearTimeout() {}, setInterval: (callback, ms) => { intervals.push({ callback, ms }); }, queueMicrotask, fetch: sidecar.fetch });
+  const timerTick = intervals.find((entry) => entry.ms === 1000)?.callback;
+  const tick = intervals.find((entry) => entry.ms === 2000)?.callback ?? intervals.at(-1)?.callback;
+  return { elements, requests, sidecar, storage, document, workspace: (value) => workspaceChange(value), tick, timerTick, intervals };
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
@@ -806,4 +809,32 @@ test('dropping files onto a row whose blur save is in flight snapshots live File
   assert.equal(updateBody.newText, '正在保存的新正文');
   assert.equal(updateBody.newAttachments.length, 1);
   assert.equal(updateBody.newAttachments[0].name, 'dropped.png');
+});
+
+test('countdown timer ticks every 1s independently of the 2s backend poll interval', async () => {
+  let clock = 100000;
+  const panel = harness({ now: () => clock });
+  assert.deepEqual(panel.intervals.map((entry) => entry.ms), [1000, 2000]);
+  await openRegistered(panel);
+  const [row] = panel.elements.get('.rows').children;
+  const timer = row.querySelector('.row-timer');
+  const water = row.querySelector('.row-water');
+  assert.equal(timer.textContent, '30s');
+  const initialTransform = water.style.transform;
+
+  clock += 1000;
+  panel.timerTick();
+  assert.equal(timer.textContent, '29s');
+  assert.notEqual(water.style.transform, initialTransform);
+  assert.equal(panel.requests.length, 1, '1s UI tick must not trigger extra backend polling');
+
+  panel.document.hidden = true;
+  clock += 1000;
+  panel.timerTick();
+  assert.equal(timer.textContent, '29s', 'hidden document skips 1s UI repaint');
+
+  panel.document.hidden = false;
+  panel.document.listeners.visibilitychange();
+  assert.equal(timer.textContent, '28s', 'becoming visible snaps countdown immediately');
+  assert.equal(panel.requests.length, 2);
 });
