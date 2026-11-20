@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import crypto from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { execFile, spawn, spawnSync } from "node:child_process";
@@ -131,19 +130,20 @@ test("空收件箱、零字节与全完成/无效行均安全放行", (t) => {
   assert.deepEqual(runStop(ws, "11111111-1111-4111-8111-111111111101"), { decision: "allow" });
 });
 
+function copyHookModules(pluginDir) {
+  for (const directory of ["scripts", "adapters"]) {
+    fs.cpSync(path.join(REPO_ROOT, directory), path.join(pluginDir, directory), { recursive: true });
+  }
+}
+
 test("Windows run-hook.cmd 空箱短路与全局安装隔离", { skip: process.platform !== "win32" }, (t) => {
   const root = makeTempDir(t);
 
   // 1. 工作区内 .agents/plugins/fons 安装：空收件箱短路返回
   const localWs = path.join(root, "local-ws");
   const localPluginDir = path.join(localWs, ".agents", "plugins", "fons");
-  fs.mkdirSync(path.join(localPluginDir, "scripts"), { recursive: true });
+  copyHookModules(localPluginDir);
   fs.copyFileSync(HOOKS_JSON, path.join(localPluginDir, "hooks.json"));
-  fs.copyFileSync(RUN_HOOK_CMD, path.join(localPluginDir, "scripts", "run-hook.cmd"));
-  fs.copyFileSync(HOOK_SCRIPT, path.join(localPluginDir, "scripts", "fons-hook.mjs"));
-  fs.copyFileSync(path.join(path.dirname(HOOK_SCRIPT), "fons-store.mjs"), path.join(localPluginDir, "scripts", "fons-store.mjs"));
-  fs.copyFileSync(path.join(path.dirname(HOOK_SCRIPT), "fons-inbox.mjs"),
-    path.join(localPluginDir, "scripts", "fons-inbox.mjs"));
 
   assert.deepEqual(
     runHookCmd(localPluginDir, "PreInvocation", {
@@ -166,13 +166,8 @@ test("Windows run-hook.cmd 空箱短路与全局安装隔离", { skip: process.p
 
   // 2. 模拟全局目录 ~/.gemini/config/plugins/fons 安装：不应误判工作区空箱而短路
   const globalPluginDir = path.join(root, ".gemini", "config", "plugins", "fons");
-  fs.mkdirSync(path.join(globalPluginDir, "scripts"), { recursive: true });
+  copyHookModules(globalPluginDir);
   fs.copyFileSync(HOOKS_JSON, path.join(globalPluginDir, "hooks.json"));
-  fs.copyFileSync(RUN_HOOK_CMD, path.join(globalPluginDir, "scripts", "run-hook.cmd"));
-  fs.copyFileSync(HOOK_SCRIPT, path.join(globalPluginDir, "scripts", "fons-hook.mjs"));
-  fs.copyFileSync(path.join(path.dirname(HOOK_SCRIPT), "fons-store.mjs"), path.join(globalPluginDir, "scripts", "fons-store.mjs"));
-  fs.copyFileSync(path.join(path.dirname(HOOK_SCRIPT), "fons-inbox.mjs"),
-    path.join(globalPluginDir, "scripts", "fons-inbox.mjs"));
 
   const targetWs = path.join(root, "target-ws");
   writeIdeas(targetWs, "- [ ] 补充全局安装隔离测试", 70, "11111111-1111-4111-8111-111111111103");
@@ -742,13 +737,6 @@ test('launcher starts PreInvocation for an empty retraction marker but keeps Sto
   assert.deepEqual(JSON.parse(launch(fixture, 'Stop')), { decision: 'allow' });
 });
 
-test('launcher does not start Node for only a migration lock', { skip: process.platform !== 'win32' }, (t) => {
-  const fixture = launcherFixture(t);
-  fs.mkdirSync(path.join(fixture.fonsDir, '.migration.lock'), { recursive: true });
-  assert.deepEqual(JSON.parse(launch(fixture, 'PreInvocation')), {});
-  assert.deepEqual(JSON.parse(launch(fixture, 'Stop')), { decision: 'allow' });
-});
-
 test('launcher outside a workspace plugin mount does not apply workspace short circuit', { skip: process.platform !== 'win32' }, (t) => {
   const fixture = launcherFixture(t, 'global');
   assert.equal(launch(fixture, 'PreInvocation'), 'NODE_STARTED');
@@ -959,25 +947,6 @@ test('delivered and completed items reject text edits while editing a buffering 
   assert.deepEqual(runHook({ hookEventName: 'PreInvocation', conversationId: HOOK_A, cwd: ws }, { FONS_DEBOUNCE_SEC: '0' }), {});
 });
 
-test('a retained migration lock leaves another session PreInvocation and Stop operational', (t) => {
-  const ws = makeTempDir(t);
-  const fonsDir = path.join(ws, '.agents', 'fons');
-  const lock = path.join(fonsDir, '.migration.lock');
-  fs.mkdirSync(lock, { recursive: true });
-  const claimed = path.join(fonsDir, 'ideas.migrating-999999.md');
-  fs.writeFileSync(claimed, '- [ ] preserved legacy\n');
-  fs.writeFileSync(path.join(lock, 'owner.json'), JSON.stringify({ pid: 999999, startedAt: 1, step: 'publishing' }));
-  const ctx = { rootDir: ws, sessionId: HOOK_B };
-  store.addIdeas({ ...ctx, texts: ['new independent item'] });
-  const message = runHook({ hookEventName: 'PreInvocation', cwd: ws, conversationId: HOOK_B }, { FONS_DEBOUNCE_SEC: '0' });
-  assert.match(message.injectSteps[0].systemMessage.systemMessage, /new independent item/);
-  const stop = runStop(ws, HOOK_B);
-  assert.equal(stop.decision, 'continue');
-  assert.match(stop.reason, /new independent item/);
-  assert.equal(fs.readFileSync(claimed, 'utf8'), '- [ ] preserved legacy\n');
-  assert.equal(fs.existsSync(lock), true);
-});
-
 test('each pending item keeps its own timer when new items arrive or delivered items are archived', (t) => {
   const ws = makeTempDir(t, HOOK_A);
   const ctx = { rootDir: ws, sessionId: HOOK_A };
@@ -1011,9 +980,7 @@ test('each pending item keeps its own timer when new items arrive or delivered i
 
 test('launcher sends a last-item retraction once and then resumes empty fast exit', { skip: process.platform !== 'win32' }, (t) => {
   const fixture = launcherFixture(t);
-  for (const name of ['fons-hook.mjs', 'fons-inbox.mjs', 'fons-store.mjs']) {
-    fs.copyFileSync(path.join(path.dirname(HOOK_SCRIPT), name), path.join(fixture.plugin, 'scripts', name));
-  }
+  copyHookModules(fixture.plugin);
   const ctx = { rootDir: fixture.root, sessionId: HOOK_A };
   store.addIdeas({ ...ctx, texts: ['remove last'] });
   const pre = { hookEventName: 'PreInvocation', conversationId: HOOK_A, cwd: fixture.root };
@@ -1046,9 +1013,7 @@ test('POSIX launcher short circuits an empty inbox and detects an editor-created
 
 test('an old session registers only when a nonempty workspace inbox lets its launcher run', { skip: process.platform !== 'win32' }, (t) => {
   const fixture = launcherFixture(t);
-  for (const name of ['fons-hook.mjs', 'fons-inbox.mjs', 'fons-store.mjs']) {
-    fs.copyFileSync(path.join(path.dirname(HOOK_SCRIPT), name), path.join(fixture.plugin, 'scripts', name));
-  }
+  copyHookModules(fixture.plugin);
   const appData = path.join(fixture.root, 'host');
   const transcriptPath = path.join(appData, 'brain', HOOK_A, 'transcript.jsonl');
   const input = { hookEventName: 'PreInvocation', conversationId: HOOK_A, cwd: fixture.root, transcriptPath, lastUserInput: 'old session' };
@@ -1062,21 +1027,6 @@ test('an old session registers only when a nonempty workspace inbox lets its lau
   assert.equal(registered.title, 'old session');
   assert.deepEqual(runHookCmd(fixture.plugin, 'PreInvocation', { ...input, lastUserInput: 'changed' }), {});
   assert.deepEqual(JSON.parse(fs.readFileSync(index, 'utf8')), registered);
-});
-
-test('Hook migration preserves a delivered item without injecting it again', (t) => {
-  const ws = makeTempDir(t);
-  const dir = path.join(ws, '.agents', 'fons');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'ideas.md'), '- [ ] already delivered\n');
-  const id = crypto.createHash('sha1').update('already delivered').digest('hex').slice(0, 12);
-  fs.writeFileSync(path.join(dir, '.state.json'), JSON.stringify({ [HOOK_A]: { delivered: { [id]: { text: 'already delivered', deliveredAt: 1, ackToken: 'aaaaaaaaaaaaaaaa' } } } }));
-  const input = { hookEventName: 'PreInvocation', cwd: ws, conversationId: HOOK_A };
-  assert.deepEqual(runHook(input, { FONS_DEBOUNCE_SEC: '0' }), {});
-  assert.deepEqual(runHook(input, { FONS_DEBOUNCE_SEC: '0' }), {});
-  const item = store.readPoolSnapshot({ rootDir: ws, sessionId: HOOK_A }).items[0];
-  assert.equal(item.status, 'delivered');
-  assert.equal(fs.existsSync(path.join(dir, 'ideas.md')), false);
 });
 
 test('a concurrent hold on another item does not lose Hook delivery or UI state', async (t) => {

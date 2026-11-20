@@ -6,7 +6,7 @@ LOCAL_PLUG_MARKER="../../../.agents/plugins/fons/hooks.json"
 REL_FONS="../../fons"
 
 if [ -f "$LOCAL_PLUG_MARKER" ] && [ "${1:-}" != "SessionStart" ]; then
-  for file in "$REL_FONS"/ideas-*.md "$REL_FONS"/ideas.md; do
+  for file in "$REL_FONS"/ideas-*.md; do
     if [ -s "$file" ]; then exec node "$SCRIPT_DIR/fons-hook.mjs" --scope=workspace; fi
   done
   if [ "${1:-}" = "PreInvocation" ]; then

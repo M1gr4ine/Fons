@@ -48,7 +48,7 @@ function invalidAttachment(message) {
   return Object.assign(new Error(message), { code: 'FONS_INVALID_ATTACHMENT' });
 }
 
-export function isImageStoredName(storedName) {
+function isImageStoredName(storedName) {
   return Boolean(IMAGE_MIME_BY_EXT[path.extname(String(storedName ?? '')).toLowerCase()]);
 }
 
@@ -94,6 +94,12 @@ function releaseInboxLock(lock, owner) {
   }
 }
 
+function processStatus(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return 'unknown';
+  try { process.kill(pid, 0); return 'active'; }
+  catch (error) { return error.code === 'ESRCH' ? 'interrupted' : 'unknown'; }
+}
+
 function reclaimInboxLock(lock) {
   let entries;
   try { entries = fs.readdirSync(lock); }
@@ -120,23 +126,32 @@ function claimInboxLock(staged, lock) {
   }
 }
 
+function acquirePoolLock({ fonsDir, lock }) {
+  let staged;
+  let owner;
+  try {
+    fs.mkdirSync(fonsDir, { recursive: true });
+    staged = fs.mkdtempSync(lock + '-');
+    const ownerName = `${process.pid}-${staged.slice(lock.length + 1)}`;
+    // Publish the owner together with the directory so readers never see a half-acquired lock.
+    fs.mkdirSync(path.join(staged, ownerName));
+    owner = ownerName;
+    claimInboxLock(staged, lock);
+    return owner;
+  } catch (error) {
+    if (staged) releaseInboxLock(staged, owner);
+    throw Object.assign(new Error(error.message, { cause: error }), { code: 'FONS_POOL_LOCK' });
+  }
+}
+
 export function withPoolWrite(context, write) {
   const { fonsDir } = sessionPaths(context);
   const lock = path.join(fonsDir, `.inbox-${context.sessionId}.lock`);
-  fs.mkdirSync(fonsDir, { recursive: true });
-  const staged = fs.mkdtempSync(lock + '-');
-  const owner = `${process.pid}-${staged.slice(lock.length + 1)}`;
-  let held = staged;
-  let ownerCreated = false;
+  const owner = acquirePoolLock({ fonsDir, lock });
   try {
-    // Publish the owner together with the directory so readers never see a half-acquired lock.
-    fs.mkdirSync(path.join(staged, owner));
-    ownerCreated = true;
-    claimInboxLock(staged, lock);
-    held = lock;
     return write();
   } finally {
-    releaseInboxLock(held, ownerCreated ? owner : undefined);
+    releaseInboxLock(lock, owner);
   }
 }
 
@@ -155,7 +170,7 @@ export function findAppData(startPath, ancestorName) {
   }
 }
 
-export function readContent(filePath) {
+function readContent(filePath) {
   try { return fs.readFileSync(filePath, 'utf8'); }
   catch (error) { if (error.code === 'ENOENT') return ''; throw error; }
 }
@@ -280,7 +295,7 @@ function removeEmptyDirectory(dir) {
   catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error; }
 }
 
-export function pruneUnreferencedAttachments(paths, sessionId, { content, archive, state }) {
+function pruneUnreferencedAttachments(paths, sessionId, { content, archive, state }) {
   if (!fs.existsSync(paths.attachmentsDir)) return;
   const referenced = collectReferencedAttachments(content, sessionId);
   collectReferencedAttachments(archive, sessionId, referenced);
@@ -337,36 +352,65 @@ function publishConversation(filePath, entry) {
 }
 
 function normalizeConversation(appData, entry) {
-  const scope = entry.scope ?? (typeof entry.rootDir === 'string' && entry.rootDir ? 'workspace' : null);
-  if (scope === 'no-workspace') {
-    return {
-      scope: 'no-workspace',
-      rootDir: null,
-      fonsDir: noWorkspaceFonsDir(appData),
-      title: entry.title ?? '',
-      registeredAt: entry.registeredAt,
-    };
-  }
-  if (scope === 'workspace' && typeof entry.rootDir === 'string' && entry.rootDir) {
-    return {
-      scope: 'workspace',
-      rootDir: entry.rootDir,
-      fonsDir: path.join(entry.rootDir, '.agents', 'fons'),
-      title: entry.title ?? '',
-      registeredAt: entry.registeredAt,
-    };
-  }
-  return null;
+  const hasRoot = typeof entry.rootDir === 'string' && entry.rootDir;
+  let scope = entry.scope;
+  if (scope == null && hasRoot) scope = 'workspace';
+  if (scope !== 'no-workspace' && !(scope === 'workspace' && hasRoot)) return null;
+  const rootDir = scope === 'workspace' ? entry.rootDir : null;
+  return {
+    scope,
+    rootDir,
+    fonsDir: rootDir ? path.join(rootDir, '.agents', 'fons') : noWorkspaceFonsDir(appData),
+    title: entry.title ?? '',
+    registeredAt: entry.registeredAt,
+    host: entry.host ?? 'antigravity',
+    transcriptPath: entry.transcriptPath ?? null,
+  };
 }
 
-export function registerConversation({ appData, sessionId, rootDir = null, scope = rootDir ? 'workspace' : 'no-workspace', title }) {
+function normalizeTitle(title) {
+  return Array.from(String(title ?? '').replace(/[\r\n\u2028\u2029]/g, '')).slice(0, 20).join('');
+}
+
+export function registerConversation({
+  appData, sessionId, rootDir = null, scope = rootDir ? 'workspace' : 'no-workspace', title, host, transcriptPath,
+}) {
   if (scope !== 'workspace' && scope !== 'no-workspace') throw new Error('无效的会话作用域。');
   if (scope === 'workspace' && (typeof rootDir !== 'string' || !rootDir)) throw new Error('缺少有效的工作区目录。');
   const filePath = indexPath(appData, sessionId);
   if (fs.existsSync(filePath)) return readJson(filePath);
-  const cleanTitle = Array.from(String(title ?? '').replace(/[\r\n\u2028\u2029]/g, '')).slice(0, 20).join('');
-  const entry = { scope, rootDir: scope === 'workspace' ? rootDir : null, title: cleanTitle, registeredAt: Date.now() };
+  const entry = { scope, rootDir: scope === 'workspace' ? rootDir : null, title: normalizeTitle(title), registeredAt: Date.now() };
+  if (host !== undefined) entry.host = host;
+  if (transcriptPath !== undefined) entry.transcriptPath = transcriptPath;
   return publishConversation(filePath, entry);
+}
+
+function updateConversation({ appData, sessionId }, change) {
+  const filePath = indexPath(appData, sessionId);
+  if (!fs.existsSync(filePath) || !change(readJson(filePath))) return;
+  withPoolWrite({ fonsDir: path.dirname(filePath), sessionId }, () => {
+    const entry = readJson(filePath);
+    const changed = change(entry);
+    if (!changed) return;
+    writeJsonAtomic(filePath, { ...entry, ...changed });
+  });
+}
+
+export function backfillConversationTitle({ appData, sessionId, title, transcriptPath }) {
+  const cleanTitle = normalizeTitle(title);
+  if (!cleanTitle.trim()) return;
+  updateConversation({ appData, sessionId }, (entry) => {
+    if (!entry.scope || (typeof entry.title === 'string' && entry.title.trim())) return null;
+    if (transcriptPath !== undefined && entry.transcriptPath !== transcriptPath) return null;
+    return { title: cleanTitle };
+  });
+}
+
+export function bindConversationTranscript({ appData, sessionId, transcriptPath, expectedTranscriptPath = null }) {
+  updateConversation({ appData, sessionId }, (entry) => {
+    if (entry.host !== 'codex' || (entry.transcriptPath ?? null) !== expectedTranscriptPath) return null;
+    return { transcriptPath };
+  });
 }
 
 export function lookupConversation({ appData, sessionId }) {
@@ -476,7 +520,7 @@ export function readPoolData({ rootDir, fonsDir, sessionId }) {
   return { paths, content, archive, state, ui, rows, items, etag, mtimeMs };
 }
 
-export const DEFAULT_DEBOUNCE_SEC = 45;
+const DEFAULT_DEBOUNCE_SEC = 45;
 const HOLD_LEASE_MS = 15000;
 
 export function resolveDebounceMs() {
@@ -505,16 +549,19 @@ function itemHoldStatus(timer, since, now) {
   return { editingHold: active && now < timer.holdUntil, pausedMs };
 }
 
-function evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now }) {
+function evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now, editingHoldPolicy }) {
   const since = resolveItemSince(item.id, state, ui, mtimeMs);
   const timer = ui.timers?.[item.id];
-  const hold = debounceMs > 0 ? itemHoldStatus(timer, since, now) : { editingHold: false, pausedMs: 0 };
+  const respectsHold = debounceMs > 0 || editingHoldPolicy === 'always';
+  const hold = respectsHold ? itemHoldStatus(timer, since, now) : { editingHold: false, pausedMs: 0 };
   const elapsedMs = Math.max(0, now - since - hold.pausedMs);
   const remainingMs = debounceMs > 0 ? Math.max(0, debounceMs - elapsedMs) : 0;
   return { since, remainingMs, editingHold: hold.editingHold, pausedMs: hold.pausedMs };
 }
 
-export function computeDebounce({ items, state, ui, mtimeMs, debounceMs = resolveDebounceMs(), now = Date.now() }) {
+export function computeDebounce({
+  items, state, ui, mtimeMs, debounceMs = resolveDebounceMs(), now = Date.now(), editingHoldPolicy,
+}) {
   const uniqueItems = new Map();
   for (const item of items) {
     if (item.status === 'buffering' && !uniqueItems.has(item.text)) uniqueItems.set(item.text, item);
@@ -523,7 +570,7 @@ export function computeDebounce({ items, state, ui, mtimeMs, debounceMs = resolv
   const ready = [];
   const pendingAt = {};
   for (const item of uniqueItems.values()) {
-    const info = evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now });
+    const info = evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now, editingHoldPolicy });
     pendingAt[item.id] = info.since;
     byId.set(item.id, info);
     if (info.remainingMs <= 0 && !info.editingHold) ready.push(item);
@@ -868,283 +915,3 @@ export const archiveCompleted = poolWriter((context) => {
   else fs.unlinkSync(paths.ideas);
   return { count: done.length };
 });
-
-function migrationOwners(state, id, fallback) {
-  const owners = Object.entries(state).filter(([, bucket]) => bucket?.delivered?.[id]).map(([id]) => id);
-  return owners.length ? owners : [fallback];
-}
-
-function nextCompletionCount(counts, text) {
-  const count = counts.get(text) ?? 0;
-  counts.set(text, count + 1);
-  return count;
-}
-
-function archiveCompletionCounts(archive) {
-  const counts = new Map();
-  for (const line of archive.split(/\r?\n/)) {
-    const text = completedText(line);
-    if (text) nextCompletionCount(counts, text);
-  }
-  return counts;
-}
-
-function completedMigrationEntry(row, text, counts) {
-  const id = deliveryId(text, nextCompletionCount(counts, text));
-  let raw = row.raw;
-  if (row.completed) raw = COMPLETED_PREFIX + text + row.raw.slice(row.body.length);
-  return { raw, text, id, completed: true };
-}
-
-function migrationEntry(row, counts, active) {
-  if (row.receipt) return null;
-  const text = row.completed ? row.text : completedText(row.body);
-  if (text) return completedMigrationEntry(row, text, counts);
-  if (row.text) return { raw: row.raw, text: row.text, id: active.get(row.text) };
-  return { raw: row.raw };
-}
-
-function migrationRows(content, archive, state, sessionId) {
-  const counts = archiveCompletionCounts(archive);
-  const active = new Map(parseActiveItems(content, archive).map(({ text, id }) => [text, id]));
-  const targets = new Map();
-  for (const row of parseInbox(content).rows) {
-    const entry = migrationEntry(row, counts, active);
-    if (!entry) continue;
-    const owners = entry.id ? migrationOwners(state, entry.id, sessionId) : [sessionId];
-    for (const owner of owners) {
-      if (!targets.has(owner)) targets.set(owner, []);
-      targets.get(owner).push(entry);
-    }
-  }
-  return targets;
-}
-
-function migrationContent(entries) {
-  let content = '';
-  for (const entry of entries) {
-    if (content && !content.endsWith('\n')) content += '\n';
-    content += entry.raw;
-  }
-  return content;
-}
-
-function migrationIdMapping(entries) {
-  const counts = new Map();
-  const mapping = new Map();
-  for (const entry of entries) {
-    if (entry.completed) mapping.set(entry.id, deliveryId(entry.text, nextCompletionCount(counts, entry.text)));
-  }
-  for (const entry of entries) {
-    if (entry.text && !entry.completed) mapping.set(entry.id, deliveryId(entry.text, counts.get(entry.text) ?? 0));
-  }
-  return mapping;
-}
-
-function migrationLedger(bucket, mapping, field) {
-  const result = {};
-  for (const [oldId, newId] of mapping) {
-    if (bucket?.[field]?.[oldId]) result[newId] = bucket[field][oldId];
-  }
-  return result;
-}
-
-function migrationOutput(entries, bucket) {
-  const mapping = migrationIdMapping(entries);
-  const rest = { ...bucket };
-  delete rest.pendingSig;
-  delete rest.pendingSigAt;
-  return {
-    content: migrationContent(entries),
-    state: {
-      ...rest,
-      delivered: migrationLedger(bucket, mapping, 'delivered'),
-      acknowledged: migrationLedger(bucket, mapping, 'acknowledged'),
-      lastStopSig: '',
-      stopCount: 0,
-    },
-  };
-}
-function migrationLegacyPaths(fonsDir) {
-  return {
-    ideas: path.join(fonsDir, 'ideas.md'),
-    claimed: path.join(fonsDir, 'ideas.migrating-' + process.pid + '.md'),
-    state: path.join(fonsDir, '.state.json'),
-    stateBackup: path.join(fonsDir, '.state.legacy.json'),
-    archive: path.join(fonsDir, 'archive.md'),
-    archiveBackup: path.join(fonsDir, 'archive', 'legacy.md'),
-  };
-}
-
-function migrationCheckState(state) {
-  for (const [id, bucket] of Object.entries(state)) {
-    if (!isValidSessionId(id) && Object.keys(bucket?.delivered ?? {}).length) {
-      throw new Error('旧账本含无效会话 ID，无法安全迁移，请保留旧文件并检查账本。');
-    }
-  }
-}
-
-function migrationWrite(file, content, created) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const fd = fs.openSync(file, 'wx');
-  created.push({ file, content });
-  try { fs.writeFileSync(fd, content, 'utf8'); } finally { fs.closeSync(fd); }
-}
-
-function migrationWriteJson(file, value, created) {
-  const content = JSON.stringify(value, null, 2);
-  const staging = path.join(path.dirname(file), '.migration.lock', 'state-staging.json');
-  try {
-    writeJsonAtomic(staging, value);
-    fs.linkSync(staging, file);
-    created.push({ file, content });
-  } finally {
-    if (fs.existsSync(staging)) fs.unlinkSync(staging);
-  }
-}
-
-function migrationMove(source, target, moved) {
-  if (!fs.existsSync(source)) return;
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.linkSync(source, target);
-  moved.push({ source, target });
-  fs.unlinkSync(source);
-}
-
-
-function migrationRollback({ legacy, moved, created }) {
-  for (const { source, target } of moved.reverse()) {
-    if (fs.existsSync(source)) {
-      if (readContent(source) !== readContent(target)) throw new Error('旧文件已变化，保留迁移现场以便恢复。');
-    } else fs.linkSync(target, source);
-    fs.unlinkSync(target);
-  }
-  for (const { file, content } of created.reverse()) {
-    if (readContent(file) !== content) throw new Error('迁移目标已被修改，保留迁移现场以便恢复。');
-    fs.unlinkSync(file);
-  }
-  if (fs.existsSync(legacy.ideas)) throw new Error('旧收件箱已重新创建，保留迁移现场以便恢复。');
-  fs.linkSync(legacy.claimed, legacy.ideas);
-  fs.unlinkSync(legacy.claimed);
-}
-
-function relativeLegacyPaths(legacy, fonsDir) {
-  return Object.fromEntries(Object.entries(legacy).map(([key, file]) => [key, path.relative(fonsDir, file)]));
-}
-
-function migrationHash(content) {
-  return crypto.createHash('sha256').update(content).digest('hex');
-}
-
-function migrationPlan({ rootDir, targets, state, fonsDir }) {
-  return [...targets].map(([sessionId, entries]) => {
-    const paths = sessionPaths({ rootDir, sessionId });
-    if ([paths.ideas, paths.state, paths.ui, paths.archive].some((file) => fs.existsSync(file))) {
-      throw new Error('目标会话已有数据，旧收件箱未迁移，请先处理冲突。');
-    }
-    const output = migrationOutput(entries, state[sessionId]);
-    const record = {
-      ideas: path.relative(fonsDir, paths.ideas), state: path.relative(fonsDir, paths.state),
-      ideasHash: migrationHash(output.content), stateHash: migrationHash(JSON.stringify(output.state, null, 2)),
-    };
-    return { paths, output, record };
-  });
-}
-
-function migrationStep(context, step) {
-  context.owner.step = step;
-  writeJsonAtomic(context.ownerFile, context.owner);
-}
-
-function publishMigration(plan, created) {
-  for (const { paths, output } of plan) {
-    migrationWriteJson(paths.state, output.state, created);
-    migrationWrite(paths.ideas, output.content, created);
-  }
-}
-
-function processStatus(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return 'unknown';
-  try { process.kill(pid, 0); return 'active'; }
-  catch (error) { return error.code === 'ESRCH' ? 'interrupted' : 'unknown'; }
-}
-
-export function getMigrationWarning({ rootDir, scope }) {
-  if (scope === 'no-workspace' || !rootDir) return null;
-  const lock = path.join(rootDir, '.agents', 'fons', '.migration.lock');
-  if (!fs.existsSync(lock)) return null;
-  let owner;
-  try { owner = readJson(path.join(lock, 'owner.json')); }
-  catch { return { status: 'unknown', message: '旧数据迁移状态无法确认，请按 README 核对现场。' }; }
-  const status = owner.step === 'rollback-failed' ? 'interrupted' : processStatus(owner.pid);
-  const message = status === 'interrupted' ? '旧数据迁移中断，请按 README 手动恢复。'
-    : status === 'active' ? '旧数据正在迁移，请稍候。'
-      : '旧数据迁移状态无法确认，请按 README 核对现场。';
-  return { status, message, pid: owner.pid, startedAt: owner.startedAt, step: owner.step };
-}
-
-function releaseMigrationLock(context) {
-  if (fs.existsSync(context.ownerFile)) fs.unlinkSync(context.ownerFile);
-  fs.rmdirSync(context.lock);
-}
-
-export function migrateLegacyInbox({ rootDir, scope, sessionId }) {
-  if (scope === 'no-workspace' || !rootDir) return { migrated: false };
-  const fonsDir = sessionPaths({ rootDir, sessionId }).fonsDir;
-  const legacy = migrationLegacyPaths(fonsDir);
-  const lock = path.join(fonsDir, '.migration.lock');
-  try { fs.mkdirSync(lock); }
-  catch (error) { if (error.code === 'EEXIST' || error.code === 'ENOENT') return { migrated: false }; throw error; }
-  const context = {
-    fonsDir, lock, ownerFile: path.join(lock, 'owner.json'),
-    owner: { pid: process.pid, startedAt: Date.now(), step: 'claiming', source: relativeLegacyPaths(legacy, fonsDir), targets: [] },
-  };
-  let release = true;
-  try {
-    migrationStep(context, 'claiming');
-    return migrateClaimedLegacy({ rootDir, sessionId, legacy, context });
-  } catch (error) {
-    if (error.recoveryRequired) release = false;
-    throw error;
-  } finally {
-    if (release) releaseMigrationLock(context);
-  }
-}
-
-function migrateClaimedLegacy({ rootDir, sessionId, legacy, context }) {
-  if (fs.existsSync(legacy.claimed)) throw new Error('发现未完成的旧收件箱迁移，请先恢复。');
-  try { fs.renameSync(legacy.ideas, legacy.claimed); }
-  catch (error) { if (error.code === 'ENOENT') return { migrated: false }; throw error; }
-  const created = [];
-  const moved = [];
-  try {
-    migrationStep(context, 'planning');
-    const content = fs.readFileSync(legacy.claimed, 'utf8');
-    const archive = readContent(legacy.archive);
-    const state = readJson(legacy.state);
-    migrationCheckState(state);
-    const targets = migrationRows(content, archive, state, sessionId);
-    const plan = migrationPlan({ rootDir, targets, state, fonsDir: context.fonsDir });
-    context.owner.targets = plan.map(({ record }) => record);
-    migrationStep(context, 'publishing');
-    publishMigration(plan, created);
-    if (readContent(legacy.claimed) !== content) throw new Error('迁移期间旧收件箱发生变化，请重试。');
-    migrationStep(context, 'moving-archive');
-    migrationMove(legacy.archive, legacy.archiveBackup, moved);
-    migrationStep(context, 'moving-state');
-    migrationMove(legacy.state, legacy.stateBackup, moved);
-    migrationStep(context, 'finalizing');
-    fs.unlinkSync(legacy.claimed);
-    return { migrated: true };
-  } catch (error) {
-    try { migrationRollback({ legacy, moved, created }); }
-    catch (rollbackError) {
-      try { migrationStep(context, 'rollback-failed'); }
-      catch (recordError) { rollbackError.message += '；无法更新恢复记录：' + recordError.message; }
-      const failure = new Error(error.message + '；' + rollbackError.message);
-      failure.recoveryRequired = true;
-      throw failure;
-    }
-    throw error;
-  }
-}

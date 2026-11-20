@@ -90,11 +90,18 @@ export function splitIdeaText(text, sessionId) {
   return { note: remaining.trim(), attachments };
 }
 
+export function formatRetractedIdea(text, sessionId) {
+  const { note, attachments } = splitIdeaText(text, sessionId);
+  if (!attachments.length) return text;
+  const names = attachments.map((att) => att.name).join(', ');
+  return note ? `${note}（附件: ${names}）` : `[附件: ${names}]`;
+}
+
 export function isCompletedLine(line) {
   return COMPLETED_LINE_RE.test(line);
 }
 
-export function extractPendingText(line) {
+function extractPendingText(line) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith('#') || isCompletedLine(trimmed)) return '';
   return trimmed.replace(/^(?:[-*]\s*\[\s*\]|\[\s*\]|[-*](?=\s|$))\s*/, '').trim();
