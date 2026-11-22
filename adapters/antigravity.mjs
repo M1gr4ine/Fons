@@ -1,10 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  hasLocalWorkspaceFonsPlugin, isWorkspaceEnabled, resolveStopWaitDebounce,
+} from "../scripts/fons-config.mjs";
 import { formatRetractedIdea } from "../scripts/fons-inbox.mjs";
 import {
   findAppData, isValidSessionId, noWorkspaceFonsDir, readJson, registerConversation, sessionPaths,
 } from "../scripts/fons-store.mjs";
 import { executePoolEvent, extractAckTokensFromText } from "../scripts/fons-engine.mjs";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const HOOK_EVENTS = new Set(["PreInvocation", "SessionStart", "Stop"]);
 const UNREADABLE_LOG = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM", "EISDIR"]);
@@ -136,6 +142,16 @@ function resolveArtifactDir(input) {
     : null;
 }
 
+function workspaceHasLocalPlugin(resolvedRoot, workspacePaths) {
+  const candidates = [resolvedRoot];
+  if (Array.isArray(workspacePaths)) {
+    for (const dir of workspacePaths) {
+      if (typeof dir === "string" && dir.trim()) candidates.push(path.resolve(dir));
+    }
+  }
+  return candidates.some((dir) => hasLocalWorkspaceFonsPlugin(dir, REPO_ROOT));
+}
+
 function resolveHookContext(input, scopeMode) {
   if (!isValidSessionId(input.conversationId)) return null;
   const artifactDir = resolveArtifactDir(input);
@@ -151,17 +167,24 @@ function resolveHookContext(input, scopeMode) {
       appData,
       artifactDir,
       sessionId: input.conversationId,
+      needsAckHint: true,
     };
   }
   if (scopeMode === "no-workspace") return null;
   const rootDir = input.cwd || input.workspacePaths?.[0];
   if (!rootDir) return null;
+  const resolvedRoot = path.resolve(rootDir);
+  const appData = resolveAppData(input);
+  const localPlugin = workspaceHasLocalPlugin(resolvedRoot, input.workspacePaths);
+  if (scopeMode === "global" && localPlugin) return null;
+  if (appData && !isWorkspaceEnabled({ appData, rootDir: resolvedRoot, localPlugin })) return null;
   return {
     scope: "workspace",
-    rootDir: path.resolve(rootDir),
-    appData: resolveAppData(input),
+    rootDir: resolvedRoot,
+    appData,
     artifactDir,
     sessionId: input.conversationId,
+    needsAckHint: scopeMode === "global",
   };
 }
 
@@ -190,8 +213,8 @@ function handleSessionEvent(input, context, fallback) {
   const request = preparePoolEvent(input, paths);
   const policy = {
     rotateTokenOnStopRetry: true,
-    earlyDeliverBufferingOnStop: true,
-    ackHintPolicy: context.scope === "no-workspace" ? "once" : "never",
+    earlyDeliverBufferingOnStop: !resolveStopWaitDebounce({ appData: context.appData }),
+    ackHintPolicy: context.needsAckHint ? "once" : "never",
   };
   const attachmentPaths = { sourceDir: paths.attachmentsDir, mirrors: new Map() };
   const mirrorDir = context.scope === "no-workspace" && context.artifactDir

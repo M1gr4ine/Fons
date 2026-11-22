@@ -1,7 +1,4 @@
-import fs from 'node:fs';
-
-const page = new URL('../sidecars/fons-pool/index.html', import.meta.url);
-const sidecarPreload = '<script src="/preload.js"></script>';
+import { renderPoolBridgeHtml } from '../sidecars/fons-pool/main.mjs';
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -223,12 +220,8 @@ function installCodexBridge(window) {
 }
 
 export function readFonsMcpUi() {
-  const view = fs.readFileSync(page, 'utf8');
-  if (!view.includes(sidecarPreload)) throw new Error('Fons pool preload script is missing.');
-  const bridge = [
+  return renderPoolBridgeHtml([
     isRecord, finishPending, dispatchHostMessage, createHostRpc, poolResponse, parsePoolRequest, readBinding, applyTheme,
     openError, createPanelState, unpackPoolResult, fetchPool, connectHost, installCodexBridge,
-  ].map((helper) => helper.toString()).join('\n');
-  return view.replace(sidecarPreload, () => '<script>(() => {\n' + bridge +
-    '\ninstallCodexBridge(window);\n})();</script>');
+  ], 'installCodexBridge(window);');
 }

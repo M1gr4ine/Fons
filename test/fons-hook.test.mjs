@@ -6,6 +6,7 @@ import path from "node:path";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import * as configStore from "../scripts/fons-config.mjs";
 import * as store from "../scripts/fons-store.mjs";
 import { archiveCompleted } from "../scripts/fons-store.mjs";
 
@@ -604,21 +605,21 @@ test('Hook --scope strictly separates workspace and no-workspace plugins', (t) =
   assert.equal(store.lookupConversation({ appData, sessionId: HOOK_B }).scope, 'no-workspace');
 });
 
-test('ui-plugin no-workspace hook works through a junction with custom host appData, retraction, ACK settle, and workspace isolation', (t) => {
+test('ui-plugin global hook auto-handles workspace and no-workspace sessions, yields to local mounts, and honors config', (t) => {
   const root = makeTempDir(t);
   const linkedPlugin = path.join(root, 'plugins', 'fons-pool');
   fs.mkdirSync(path.dirname(linkedPlugin), { recursive: true });
   fs.symlinkSync(path.join(REPO_ROOT, 'ui-plugin'), linkedPlugin, process.platform === 'win32' ? 'junction' : 'dir');
   const uiHooks = JSON.parse(fs.readFileSync(path.join(linkedPlugin, 'hooks.json'), 'utf8'));
-  const hookCommand = uiHooks['fons-no-workspace'].PreInvocation[0].command;
+  const hookCommand = uiHooks['fons-pool'].PreInvocation[0].command;
   assert.equal(hookCommand, 'node scripts/bootstrap-hook.mjs');
 
-  const runUiHook = (payload, extraEnv = {}) => {
+  const runUiHook = (payload, extraEnv = {}, pluginDir = linkedPlugin) => {
     const res = spawnSync(process.execPath, ['scripts/bootstrap-hook.mjs'], {
-      cwd: linkedPlugin,
+      cwd: pluginDir,
       input: JSON.stringify(payload),
       encoding: 'utf8',
-      env: { ...process.env, FONS_APP_DATA: '', ...extraEnv },
+      env: { ...process.env, FONS_APP_DATA: '', FONS_DEBOUNCE_SEC: '', FONS_STOP_WAIT_DEBOUNCE: '', ...extraEnv },
     });
     assert.equal(res.status, 0, `ui-plugin hook exited with ${res.status}: ${res.stderr}`);
     return JSON.parse(res.stdout.trim());
@@ -628,7 +629,7 @@ test('ui-plugin no-workspace hook works through a junction with custom host appD
   const appData = path.join(root, 'custom-host-data');
   const transcriptPath = path.join(appData, 'brain', HOOK_A, 'transcript.jsonl');
 
-  // SessionStart registers under custom host appData even when inbox is empty
+  // SessionStart registers no-workspace session under custom host appData even when inbox is empty
   const noWsStart = { hookEventName: 'SessionStart', conversationId: HOOK_A, workspacePaths: [], transcriptPath, lastUserInput: '全局会话' };
   assert.deepEqual(runUiHook(noWsStart), {});
   assert.equal(store.lookupConversation({ appData, sessionId: HOOK_A }).scope, 'no-workspace');
@@ -645,12 +646,58 @@ test('ui-plugin no-workspace hook works through a junction with custom host appD
   const msg = delivered.injectSteps[0].systemMessage.systemMessage;
   assert.match(msg, /经 junction 投递/);
 
-  // Workspace payload is ignored even while no-workspace inbox is non-empty
-  const wsPayload = { hookEventName: 'PreInvocation', conversationId: HOOK_B, cwd: root, workspacePaths: [root], transcriptPath: path.join(appData, 'brain', HOOK_B, 'transcript.jsonl') };
-  assert.deepEqual(runUiHook(wsPayload, { FONS_DEBOUNCE_SEC: '0' }), {});
-  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_B }), null);
+  // Unmounted workspace auto-registers on SessionStart without creating .agents/fons, and delivers with one-time ACK hint
+  const unmountedWs = path.join(root, 'plain-project');
+  fs.mkdirSync(unmountedWs, { recursive: true });
+  const wsTranscript = path.join(appData, 'brain', HOOK_B, 'transcript.jsonl');
+  const wsStart = { hookEventName: 'SessionStart', conversationId: HOOK_B, cwd: unmountedWs, workspacePaths: [unmountedWs], transcriptPath: wsTranscript, lastUserInput: '新项目会话' };
+  assert.deepEqual(runUiHook(wsStart), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_B }).scope, 'workspace');
+  assert.equal(fs.existsSync(path.join(unmountedWs, '.agents')), false);
 
-  // Removing delivered item sends withdrawal once and then returns empty
+  // Config-driven debounceSec & stopWaitDebounce apply without env vars
+  configStore.updateFonsConfig(appData, { debounceSec: 45, stopWaitDebounce: true });
+  store.addIdeas({ rootDir: unmountedWs, sessionId: HOOK_B, texts: ['受配置等待蓄水'] });
+  const wsPre = { hookEventName: 'PreInvocation', conversationId: HOOK_B, cwd: unmountedWs, workspacePaths: [unmountedWs], transcriptPath: wsTranscript };
+  assert.deepEqual(runUiHook(wsPre), {});
+  assert.deepEqual(runUiHook({ ...wsPre, hookEventName: 'Stop', terminationReason: 'NO_TOOL_CALL', fullyIdle: true }), { decision: 'allow' });
+
+  configStore.updateFonsConfig(appData, { debounceSec: 0, stopWaitDebounce: false });
+  const wsDelivered = runUiHook(wsPre);
+  assert.match(wsDelivered.injectSteps[0].systemMessage.systemMessage, /^\[FONS\] 完成后末行附 \[FONS_ACK: 编号\]\n1\. 受配置等待蓄水 \[FONS:[a-f0-9]{8}\]$/);
+
+  // Workspace with a local .agents/plugins/fons mount causes global hook to yield (including from a subdirectory cwd)
+  const localWs = path.join(root, 'local-mounted-project');
+  const localSub = path.join(localWs, 'packages', 'sub');
+  const localHooks = path.join(localWs, '.agents', 'plugins', 'fons', 'hooks.json');
+  fs.mkdirSync(path.dirname(localHooks), { recursive: true });
+  fs.mkdirSync(localSub, { recursive: true });
+  fs.writeFileSync(localHooks, '{}', 'utf8');
+  const HOOK_C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  assert.deepEqual(runUiHook({
+    hookEventName: 'SessionStart', conversationId: HOOK_C, cwd: localSub, workspacePaths: [localWs],
+    transcriptPath: path.join(appData, 'brain', HOOK_C, 'transcript.jsonl'),
+  }), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_C }), null);
+
+  // Disabling a workspace prevents registration AND halts mid-session PreInvocation/Stop delivery
+  const HOOK_D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const disabledWs = path.join(root, 'disabled-project');
+  fs.mkdirSync(disabledWs, { recursive: true });
+  configStore.updateFonsConfig(appData, { workspaceAction: { path: disabledWs, mode: 'disable' } });
+  assert.deepEqual(runUiHook({
+    hookEventName: 'SessionStart', conversationId: HOOK_D, cwd: disabledWs, workspacePaths: [disabledWs],
+    transcriptPath: path.join(appData, 'brain', HOOK_D, 'transcript.jsonl'),
+  }), {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_D }), null);
+
+  configStore.updateFonsConfig(appData, { workspaceAction: { path: unmountedWs, mode: 'disable' } });
+  store.addIdeas({ rootDir: unmountedWs, sessionId: HOOK_B, texts: ['停用后不应投递'] });
+  assert.deepEqual(runUiHook(wsPre), {});
+  assert.deepEqual(runUiHook({ ...wsPre, hookEventName: 'Stop', terminationReason: 'NO_TOOL_CALL', fullyIdle: true }), { decision: 'allow' });
+  configStore.updateFonsConfig(appData, { workspaceAction: { path: unmountedWs, mode: 'enable' } });
+
+  // Removing delivered no-workspace item sends withdrawal once and then returns empty
   const row = store.readPoolSnapshot(noWsCtx).items[0];
   store.removeIdea({ ...noWsCtx, rowIndex: row.rowIndex, expectedRaw: row.raw });
   const retracted = runUiHook(noWsPre);
@@ -659,7 +706,7 @@ test('ui-plugin no-workspace hook works through a junction with custom host appD
 
   // Re-add and settle via Stop ACK
   store.addIdeas({ ...noWsCtx, texts: ['最终收尾确认'] });
-  const secondMsg = runUiHook(noWsPre, { FONS_DEBOUNCE_SEC: '0' }).injectSteps[0].systemMessage.systemMessage;
+  const secondMsg = runUiHook(noWsPre).injectSteps[0].systemMessage.systemMessage;
   assert.match(secondMsg, /^\[FONS\]\n1\. 最终收尾确认 \[FONS:[a-f0-9]{8}\]$/);
   const token = ackToken(secondMsg);
   writeTranscript(path.dirname(transcriptPath), 'transcript.jsonl', [userStep, answer(`已完成。\n[FONS_ACK: ${token}]`)]);
@@ -670,15 +717,13 @@ test('ui-plugin no-workspace hook works through a junction with custom host appD
   const copiedPlugin = path.join(root, 'plugins', 'fons-pool-copied');
   fs.cpSync(path.join(REPO_ROOT, 'ui-plugin'), copiedPlugin, { recursive: true });
   fs.writeFileSync(path.join(copiedPlugin, 'fons-root.json'), JSON.stringify({ root: REPO_ROOT }), 'utf8');
-  const copiedRes = spawnSync(process.execPath, ['scripts/bootstrap-hook.mjs'], {
-    cwd: copiedPlugin,
-    input: JSON.stringify({ hookEventName: 'SessionStart', conversationId: HOOK_B, workspacePaths: [], transcriptPath: path.join(appData, 'brain', HOOK_B, 'transcript.jsonl'), lastUserInput: '目录安装' }),
-    encoding: 'utf8',
-    env: { ...process.env, FONS_APP_DATA: '' },
-  });
-  assert.equal(copiedRes.status, 0, copiedRes.stderr);
-  assert.deepEqual(JSON.parse(copiedRes.stdout.trim()), {});
-  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_B }).scope, 'no-workspace');
+  const HOOK_E = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  const copiedRes = runUiHook({
+    hookEventName: 'SessionStart', conversationId: HOOK_E, workspacePaths: [],
+    transcriptPath: path.join(appData, 'brain', HOOK_E, 'transcript.jsonl'), lastUserInput: '目录安装',
+  }, {}, copiedPlugin);
+  assert.deepEqual(copiedRes, {});
+  assert.equal(store.lookupConversation({ appData, sessionId: HOOK_E }).scope, 'no-workspace');
 });
 
 test('SessionStart registers an empty session without creating a workspace inbox', (t) => {

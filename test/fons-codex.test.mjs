@@ -6,6 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { updateFonsConfig } from "../scripts/fons-config.mjs";
 import { evaluateHook } from "../scripts/fons-hook.mjs";
 import {
   addIdeas, holdEditing, listConversations, lookupConversation, noWorkspaceFonsDir, readJson, readPoolSnapshot,
@@ -465,4 +466,30 @@ test("Codex holds an edited draft even when debounce is disabled", (t) => {
   assert.equal(readPoolSnapshot(f.context).items[0].status, "buffering");
   releaseEditing({ ...f.context, id });
   assert.match(contextMessage(call(f, "PostToolUse", { tool_use_id: "after-release" })), /currently editing/);
+});
+
+test("Codex honors config.json debounceSec, stopWaitDebounce, and disabledWorkspaces without env vars", (t) => {
+  const f = fixture(t);
+  delete process.env.FONS_DEBOUNCE_SEC;
+  delete process.env.FONS_STOP_WAIT_DEBOUNCE;
+
+  updateFonsConfig(f.appData, { debounceSec: 60, stopWaitDebounce: true });
+  call(f, "SessionStart", { source: "startup" });
+  addIdeas({ ...f.context, texts: ["等待配置蓄水"] });
+  assert.deepEqual(call(f, "PostToolUse", { tool_use_id: "t1" }), {});
+  assert.deepEqual(call(f, "Stop"), {});
+  assert.equal(readPoolSnapshot({ ...f.context, appData: f.appData }).items[0].status, "buffering");
+
+  // Disabling workspace stops mid-session delivery and blocks new session registration
+  updateFonsConfig(f.appData, { debounceSec: 0, stopWaitDebounce: false, workspaceAction: { path: f.cwd, mode: "disable" } });
+  assert.deepEqual(call(f, "PostToolUse", { tool_use_id: "t2" }), {});
+  assert.deepEqual(call(f, "Stop"), {});
+  call(f, "SessionStart", { source: "startup", session_id: OTHER, transcript_path: null });
+  assert.equal(lookupConversation({ appData: f.appData, sessionId: OTHER }), null);
+
+  // Re-enabling restores immediate delivery and allows new session registration
+  updateFonsConfig(f.appData, { workspaceAction: { path: f.cwd, mode: "enable" } });
+  assert.match(contextMessage(call(f, "PostToolUse", { tool_use_id: "t3" })), /等待配置蓄水/);
+  call(f, "SessionStart", { source: "startup", session_id: OTHER, transcript_path: null });
+  assert.equal(lookupConversation({ appData: f.appData, sessionId: OTHER })?.scope, "workspace");
 });

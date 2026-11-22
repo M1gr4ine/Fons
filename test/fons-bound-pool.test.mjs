@@ -94,3 +94,26 @@ test('bound attachment reads serve session attachments and reject traversal name
   assert.equal(fs.existsSync(ctx.paths.ideas), false);
   assert.deepEqual(call('attachment', { storedName: ATTACHMENT }), expected);
 });
+
+test('bound settings route updates config, enforces session isolation, and respects disabled workspaces', (t) => {
+  const ctx = setup(t);
+  const call = mount(ctx);
+  const workspaceUris = [pathToFileURL(ctx.root).href];
+
+  assert.equal(call('settings', { conversationId: OTHER }).status, 403);
+  const initial = call('settings', { workspaceUris });
+  assert.equal(initial.sessionRegistered, true);
+  assert.equal(initial.canRegisterSession, false);
+  assert.equal(initial.currentWorkspace.enabled, true);
+
+  const saved = call('settings', { workspaceUris, update: { debounceSec: 0, stopWaitDebounce: true } });
+  assert.equal(saved.config.debounceSec, 0);
+  assert.equal(saved.config.stopWaitDebounce, true);
+
+  call('settings', { workspaceUris, update: { workspaceAction: { path: ctx.root, mode: 'disable' } } });
+  assert.deepEqual(call('', { workspaceUris }), { registered: true, workspaceDisabled: true, scope: 'workspace' });
+  assert.equal(call('add', { workspaceUris, texts: ['blocked'] }).status, 409);
+
+  call('settings', { workspaceUris, update: { workspaceAction: { path: ctx.root, mode: 'enable' } } });
+  assert.equal(call('', { workspaceUris }).registered, true);
+});

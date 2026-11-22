@@ -5,6 +5,8 @@ import {
   MAX_ATTACHMENT_BYTES, MAX_ITEM_ATTACHMENTS, addIdeas, archiveCompleted, completeIdea, readPoolSnapshot,
 } from './fons-store.mjs';
 import { formatSessions, listSessions, resolveSession } from './fons-sessions.mjs';
+import { openPanelUrl, startPanelServer } from './fons-panel.mjs';
+import { prepareClaudePlugin } from '../claude/init.mjs';
 import { prepareCodexPlugin } from '../codex/init.mjs';
 
 const USAGE = `用法:
@@ -12,16 +14,19 @@ const USAGE = `用法:
   fons [-s <会话ID> | -n | --no-workspace] list                             查看待处理条目及其确认令牌
   fons [-s <会话ID> | -n | --no-workspace] done <令牌...>                   仅确认指定条目（【√】）
   fons [-s <会话ID> | -n | --no-workspace] archive                          归档已完成条目
-  fons [-s <会话ID> | -n | --no-workspace] sessions                        列出已登记会话
+  fons [-s <会话ID> | -n | --no-workspace] sessions                         列出已登记会话
+  fons [-s <会话ID> | -n | --no-workspace] [--port <端口>] [--no-open] panel  启动本地灵感池 Web 面板
   fons codex init                                                           准备 Codex 插件安装
+  fons claude init                                                          准备 Claude Code 插件安装
   fons help                                                                 显示帮助
 
-宿主选择：--host codex|antigravity（或 FONS_HOST）`;
+宿主选择：--host claude|codex|antigravity（或 FONS_HOST）`;
 
 const OPTION_KEYS = {
   '-s': 'sessionId',
   '--session': 'sessionId',
   '--host': 'host',
+  '--port': 'port',
   '-a': 'attachPaths',
   '--attach': 'attachPaths',
 };
@@ -35,18 +40,30 @@ function optionValue(args, index, flag, inlineValue) {
   return value;
 }
 
+const FLAG_OPTIONS = {
+  '-n': ['scope', 'no-workspace'],
+  '--no-workspace': ['scope', 'no-workspace'],
+  '--no-open': ['noOpen', true],
+};
+
+function splitOptionArg(arg) {
+  const separator = arg.indexOf('=');
+  const flag = separator < 0 ? arg : arg.slice(0, separator);
+  const inlineValue = separator < 0 ? undefined : arg.slice(separator + 1);
+  const key = Object.hasOwn(OPTION_KEYS, flag) ? OPTION_KEYS[flag] : null;
+  return { flag, inlineValue, key };
+}
+
 function parseOptions(args) {
   const options = { args: [], attachPaths: [] };
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
-    if (arg === '-n' || arg === '--no-workspace') {
-      options.scope = 'no-workspace';
+    if (Object.hasOwn(FLAG_OPTIONS, arg)) {
+      const [key, value] = FLAG_OPTIONS[arg];
+      options[key] = value;
       continue;
     }
-    const separator = arg.indexOf('=');
-    const flag = separator < 0 ? arg : arg.slice(0, separator);
-    const inlineValue = separator < 0 ? undefined : arg.slice(separator + 1);
-    const key = Object.hasOwn(OPTION_KEYS, flag) ? OPTION_KEYS[flag] : null;
+    const { flag, inlineValue, key } = splitOptionArg(arg);
     if (!key) {
       options.args.push(arg);
       continue;
@@ -147,10 +164,20 @@ function run(context, args, attachPaths) {
   return cmdAdd(context, args, attachPaths);
 }
 
-function cmdCodexInit(options) {
-  if (options.attachPaths.length || options.scope || options.sessionId || options.host) {
-    throw new Error('codex init 不接受会话或附件参数。');
+function rejectPanelOptions(options) {
+  if (options.port !== undefined || options.noOpen) {
+    throw new Error('--port 和 --no-open 仅适用于 panel 子命令。');
   }
+}
+
+function rejectInitOptions(options, commandName) {
+  if (options.attachPaths.length || options.scope || options.sessionId || options.host || options.port !== undefined || options.noOpen) {
+    throw new Error(commandName + ' 不接受会话、面板或附件参数。');
+  }
+}
+
+function cmdCodexInit(options) {
+  rejectInitOptions(options, 'codex init');
   const { marketplaceRoot, pluginId } = prepareCodexPlugin();
   process.stdout.write('已准备 Codex 插件。请使用 Codex CLI 注册并安装，再审阅 Fons Hook 的信任请求。\n'
     + '插件市场目录：' + marketplaceRoot + '\n'
@@ -158,9 +185,30 @@ function cmdCodexInit(options) {
     + 'codex plugin add ' + pluginId + '\n');
 }
 
+function cmdClaudeInit(options) {
+  rejectInitOptions(options, 'claude init');
+  const { marketplaceRoot, pluginId } = prepareClaudePlugin();
+  process.stdout.write('已准备 Claude Code 插件。执行下方命令注册市场并安装插件（claude plugin marketplace add 会把插件市场记录写入 Claude 的用户设置）：\n'
+    + '插件市场目录：' + marketplaceRoot + '\n'
+    + 'claude plugin marketplace add "' + marketplaceRoot + '"\n'
+    + 'claude plugin install ' + pluginId + '\n');
+}
+
 function cmdSessions(options) {
+  rejectPanelOptions(options);
   if (options.attachPaths.length) throw new Error('sessions 不支持 -a/--attach 参数。');
   process.stdout.write(formatSessions(listSessions(options)) + '\n');
+}
+
+async function cmdPanel(options) {
+  if (options.attachPaths.length) throw new Error('panel 不支持 -a/--attach 参数。');
+  const selector = { sessionId: options.sessionId, host: options.host, scope: options.scope };
+  const panel = await startPanelServer({ port: options.port, selector });
+  process.stdout.write('Fons 灵感池面板已启动：' + panel.url + '\n按 Ctrl+C 停止服务。\n');
+  if (!options.noOpen) openPanelUrl(panel.url);
+  const shutdown = () => { void panel.close().then(() => process.exit(0)); };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
 }
 
 function reportError(error) {
@@ -168,7 +216,7 @@ function reportError(error) {
   process.exitCode = error.exitCode ?? 1;
 }
 
-function runCli(options) {
+async function runCli(options) {
   const { args, attachPaths } = options;
   if (!args.length && !attachPaths.length) throw new Error(USAGE);
   if (!attachPaths.length && args.length === 1 && ['help', '--help', '-h'].includes(args[0])) {
@@ -176,12 +224,15 @@ function runCli(options) {
     return;
   }
   if (args.length === 2 && args[0] === 'codex' && args[1] === 'init') return cmdCodexInit(options);
+  if (args.length === 2 && args[0] === 'claude' && args[1] === 'init') return cmdClaudeInit(options);
   if (args.length === 1 && args[0] === 'sessions') return cmdSessions(options);
+  if (args.length === 1 && args[0] === 'panel') return cmdPanel(options);
+  rejectPanelOptions(options);
   run(resolveSession(options), args, attachPaths);
 }
 
 try {
-  runCli(parseOptions(process.argv.slice(2)));
+  await runCli(parseOptions(process.argv.slice(2)));
 } catch (error) {
   reportError(error);
 }

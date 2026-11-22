@@ -20,7 +20,7 @@ export function evaluateHook(input, scopeMode = "all", host = "antigravity") {
 
 export function runMain(argv = process.argv.slice(2)) {
   const scopeMode = readOption(argv, "--scope", "all");
-  if (!["all", "workspace", "no-workspace"].includes(scopeMode)) {
+  if (!["all", "workspace", "no-workspace", "global"].includes(scopeMode)) {
     throw new Error("无效的 Hook 作用域：" + scopeMode);
   }
   const host = readOption(argv, "--host", "antigravity");

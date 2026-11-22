@@ -1,15 +1,26 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  canonicalPath, hasEnvDebounceOverride, hasEnvStopWaitOverride, hasLocalWorkspaceFonsPlugin,
+  isSameOrSubpath, isWorkspaceEnabled, readFonsConfig, resolveConfiguredDebounceMs,
+  updateFonsConfig, workspaceConfigState,
+} from '../../scripts/fons-config.mjs';
 import { isValidStoredName } from '../../scripts/fons-inbox.mjs';
 import {
   MAX_ATTACHMENT_BYTES, MAX_ITEM_ATTACHMENTS, addIdeas, archiveCompleted, completeIdea,
   findAppData, holdEditing, isValidSessionId, lookupConversation,
-  readAttachment, readPoolSnapshot, releaseEditing, removeIdea, reopenIdea, stampPoolTimers,
-  updateIdeaText,
+  readAttachment, readPoolSnapshot, registerConversation, releaseEditing, removeIdea, reopenIdea,
+  stampPoolTimers, updateIdeaText,
 } from '../../scripts/fons-store.mjs';
 
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const page = new URL('./index.html', import.meta.url);
+const SIDECAR_PRELOAD = '<script src="/preload.js"></script>';
+export const POOL_BODY_LIMIT = 256 * 1024;
+export const POOL_UPLOAD_LIMIT = 112 * 1024 * 1024;
+export const POOL_UPLOAD_ROUTES = new Set(['/api/pool/add', '/api/pool/update']);
+export const POOL_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_UPLOAD_BASE64 = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + 16;
 const rowFields = ['rowIndex', 'expectedRaw'];
 const operations = {
@@ -67,16 +78,10 @@ function freshTimerTexts(result) {
 
 function readPool(context, { etag: previous }) {
   stampPoolTimers(context);
-  const snapshot = readPoolSnapshot(context);
+  const debounceMs = resolveConfiguredDebounceMs({ appData: context.appData, env: context.env });
+  const snapshot = readPoolSnapshot({ ...context, debounceMs });
   if (previous === snapshot.etag) return { unchanged: true, etag: snapshot.etag };
   return { ...snapshot, registered: true, scope: context.scope };
-}
-
-function canonicalPath(dir) {
-  let resolved = path.resolve(dir);
-  try { resolved = fs.realpathSync.native(resolved); }
-  catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error; }
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 function uriToWorkspacePath(uri) {
@@ -87,14 +92,20 @@ function uriToWorkspacePath(uri) {
   }
 }
 
+function firstWorkspacePath(workspaceUris) {
+  if (!Array.isArray(workspaceUris) || !workspaceUris.length) return null;
+  const wsPath = uriToWorkspacePath(workspaceUris[0]);
+  return wsPath ? canonicalPath(wsPath) : null;
+}
+
+function isExistingDirectory(dirPath) {
+  return Boolean(dirPath && fs.statSync(dirPath, { throwIfNoEntry: false })?.isDirectory());
+}
+
 function workspaceMatchesRoot(workspaceUris, rootDir) {
-  const target = canonicalPath(rootDir);
   return workspaceUris.some((uri) => {
     const wsPath = uriToWorkspacePath(uri);
-    if (!wsPath) return false;
-    const base = canonicalPath(wsPath);
-    const rel = path.relative(base, target);
-    return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
+    return wsPath ? isSameOrSubpath(wsPath, rootDir) : false;
   });
 }
 
@@ -136,14 +147,37 @@ function validWorkspaceUris(workspaceUris) {
   return workspaceUris === undefined || (Array.isArray(workspaceUris) && workspaceUris.every((uri) => typeof uri === 'string'));
 }
 
-function sessionContextError(action, entry, workspaceUris) {
-  if (!entry) {
-    return action === readPool ? { registered: false } : jsonError(404, '当前会话尚未由 Fons Hook 登记。');
+function unregisteredResponse({ appData, action, workspaceUris }) {
+  if (action !== readPool) return jsonError(404, '当前会话尚未由 Fons Hook 登记。');
+  const wsDir = firstWorkspacePath(workspaceUris);
+  if (wsDir) {
+    const localPlugin = hasLocalWorkspaceFonsPlugin(wsDir, REPO_ROOT);
+    if (!isWorkspaceEnabled({ appData, rootDir: wsDir, localPlugin })) {
+      return { registered: false, workspaceDisabled: true };
+    }
   }
-  if (!hasWorkspaceMismatch(entry, workspaceUris)) return null;
+  return { registered: false };
+}
+
+function disabledWorkspaceResponse({ appData, action, rootDir, detectLocalPlugin }) {
+  const localPlugin = detectLocalPlugin ? hasLocalWorkspaceFonsPlugin(rootDir, REPO_ROOT) : false;
+  if (isWorkspaceEnabled({ appData, rootDir, localPlugin })) return null;
   return action === readPool
-    ? { registered: true, scopeMismatch: true, scope: entry.scope }
-    : jsonError(409, '当前会话与工作区状态不匹配。');
+    ? { registered: true, workspaceDisabled: true, scope: 'workspace' }
+    : jsonError(409, '当前工作区已停用 Fons，可在设置中重新启用。');
+}
+
+function sessionContextError({ appData, action, entry, workspaceUris }) {
+  if (!entry) return unregisteredResponse({ appData, action, workspaceUris });
+  if (hasWorkspaceMismatch(entry, workspaceUris)) {
+    return action === readPool
+      ? { registered: true, scopeMismatch: true, scope: entry.scope }
+      : jsonError(409, '当前会话与工作区状态不匹配。');
+  }
+  if (entry.scope === 'workspace') {
+    return disabledWorkspaceResponse({ appData, action, rootDir: entry.rootDir, detectLocalPlugin: true });
+  }
+  return null;
 }
 
 function sessionHandler(appData, action) {
@@ -153,13 +187,13 @@ function sessionHandler(appData, action) {
     if (!validWorkspaceUris(data.workspaceUris)) return jsonError(400, '无效参数：workspaceUris');
     if (!appData) return jsonError(503, '无法定位宿主数据目录。');
     const entry = lookupConversation({ appData, sessionId });
-    const rejected = sessionContextError(action, entry, data.workspaceUris);
+    const rejected = sessionContextError({ appData, action, entry, workspaceUris: data.workspaceUris });
     if (rejected) return rejected;
-    return action({ scope: entry.scope, rootDir: entry.rootDir, fonsDir: entry.fonsDir, sessionId }, data);
+    return action({ scope: entry.scope, rootDir: entry.rootDir, fonsDir: entry.fonsDir, sessionId, appData }, data);
   };
 }
 
-function bindSession(appData, boundSession) {
+function bindSession(appData, boundSession, env = process.env) {
   if (!appData || !boundSession || !isValidSessionId(boundSession.sessionId)) {
     throw new Error('缺少已登记的 Fons 会话。');
   }
@@ -171,7 +205,7 @@ function bindSession(appData, boundSession) {
   if (scope === 'workspace' && (typeof rootDir !== 'string' || canonicalPath(rootDir) !== canonicalPath(entry.rootDir))) {
     throw new Error('Fons 会话的工作区与登记不匹配。');
   }
-  return { sessionId, scope: entry.scope, rootDir: entry.rootDir, fonsDir: entry.fonsDir };
+  return { sessionId, scope: entry.scope, rootDir: entry.rootDir, fonsDir: entry.fonsDir, appData, env };
 }
 
 function boundHandler(context, action) {
@@ -181,21 +215,210 @@ function boundHandler(context, action) {
     }
     if (!validWorkspaceUris(data.workspaceUris)) return jsonError(400, '无效参数：workspaceUris');
     if (hasWorkspaceMismatch(context, data.workspaceUris)) return jsonError(409, '当前会话与工作区状态不匹配。');
+    if (context.scope === 'workspace') {
+      const disabled = disabledWorkspaceResponse({
+        appData: context.appData, action, rootDir: context.rootDir, detectLocalPlugin: false,
+      });
+      if (disabled) return disabled;
+    }
     return action(context, data);
   };
 }
 
+export function buildCurrentWorkspaceInfo({ appData, config, rootDir, detectLocalPlugin }) {
+  if (!rootDir) return null;
+  const normalized = canonicalPath(rootDir);
+  const localPlugin = detectLocalPlugin ? hasLocalWorkspaceFonsPlugin(normalized, REPO_ROOT) : false;
+  const { enabled, explicitState } = workspaceConfigState({ appData, rootDir: normalized, config, localPlugin });
+  return { path: normalized, name: path.basename(normalized) || normalized, enabled, localPlugin, explicitState };
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeWorkspaceActionPatch({ action, detectLocalPlugin }) {
+  if (!isPlainObject(action)) return action;
+  const actionPath = typeof action.path === 'string' ? action.path.trim() : '';
+  const validPath = Boolean(actionPath) && !actionPath.includes('\0') && path.isAbsolute(actionPath);
+  const localPlugin = detectLocalPlugin && validPath ? hasLocalWorkspaceFonsPlugin(actionPath, REPO_ROOT) : false;
+  return { path: action.path, mode: action.mode, localPlugin };
+}
+
+export function applySettingsPatch({ appData, update, detectLocalPlugin }) {
+  if (!isPlainObject(update)) return { error: jsonError(400, '无效的设置参数。') };
+  const patch = {};
+  if (update.debounceSec !== undefined) patch.debounceSec = update.debounceSec;
+  if (update.stopWaitDebounce !== undefined) patch.stopWaitDebounce = update.stopWaitDebounce;
+  if (update.autoAttachWorkspaces !== undefined) patch.autoAttachWorkspaces = update.autoAttachWorkspaces;
+  if (update.workspaceAction !== undefined) {
+    patch.workspaceAction = normalizeWorkspaceActionPatch({ action: update.workspaceAction, detectLocalPlugin });
+  }
+  if (!Object.keys(patch).length) return { config: readFonsConfig(appData) };
+  try {
+    return { config: updateFonsConfig(appData, patch) };
+  } catch (error) {
+    if (error.code === 'FONS_INVALID_CONFIG') return { error: jsonError(400, error.message) };
+    throw error;
+  }
+}
+
+function validateRegisterPreconditions({ appData, sessionId, workspaceUris }) {
+  if (!isValidSessionId(sessionId)) return { error: jsonError(400, '无效的会话 ID。') };
+  if (workspaceUris === undefined) return { error: jsonError(400, '缺少工作区信息，无法登记会话。') };
+  const existing = lookupConversation({ appData, sessionId });
+  if (existing) {
+    if (hasWorkspaceMismatch(existing, workspaceUris)) {
+      return { error: jsonError(409, '当前会话与工作区状态不匹配。') };
+    }
+    return { alreadyRegistered: true, rootDir: null };
+  }
+  if (!workspaceUris.length) return { alreadyRegistered: false, rootDir: null };
+  const rootDir = firstWorkspacePath(workspaceUris);
+  if (!isExistingDirectory(rootDir)) return { error: jsonError(400, '工作区目录不存在。') };
+  return { alreadyRegistered: false, rootDir };
+}
+
+function registerSessionFromSettings({ appData, sessionId, rootDir, config }) {
+  if (!rootDir) {
+    registerConversation({ appData, sessionId, scope: 'no-workspace', rootDir: null });
+    return null;
+  }
+  const localPlugin = hasLocalWorkspaceFonsPlugin(rootDir, REPO_ROOT);
+  if (!isWorkspaceEnabled({ appData, rootDir, config, localPlugin })) {
+    return jsonError(409, '当前工作区未启用 Fons。');
+  }
+  registerConversation({ appData, sessionId, scope: 'workspace', rootDir });
+  return null;
+}
+
+function validateSettingsRequest(appData, data) {
+  if (!appData) return jsonError(503, '无法定位宿主数据目录。');
+  if (data.conversationId !== undefined && data.conversationId !== '' && !isValidSessionId(data.conversationId)) {
+    return jsonError(400, '无效的会话 ID。');
+  }
+  if (!validWorkspaceUris(data.workspaceUris)) return jsonError(400, '无效参数：workspaceUris');
+  return null;
+}
+
+function resolveSettingsRootDir(entry, workspaceUris) {
+  if (workspaceUris !== undefined) return firstWorkspacePath(workspaceUris);
+  if (entry?.scope === 'workspace') return entry.rootDir;
+  return null;
+}
+
+function canRegisterCurrentSession({ sessionId, entry, workspaceUris, currentWorkspace }) {
+  if (!sessionId || entry || workspaceUris === undefined) return false;
+  if (!workspaceUris.length) return true;
+  return Boolean(currentWorkspace?.enabled && isExistingDirectory(currentWorkspace.path));
+}
+
+function applySettingsMutation({ appData, sessionId, workspaceUris, update }) {
+  if (!isPlainObject(update)) return { error: jsonError(400, '无效的设置参数。') };
+  const wantsRegister = update.registerCurrentSession === true;
+  const regPlan = wantsRegister ? validateRegisterPreconditions({ appData, sessionId, workspaceUris }) : null;
+  if (regPlan?.error) return { error: regPlan.error };
+  const updated = applySettingsPatch({ appData, update, detectLocalPlugin: true });
+  if (updated.error) return updated;
+  if (wantsRegister && !regPlan.alreadyRegistered) {
+    const regError = registerSessionFromSettings({
+      appData, sessionId, rootDir: regPlan.rootDir, config: updated.config,
+    });
+    if (regError) return { error: regError };
+  }
+  return { config: updated.config };
+}
+
+export function formatSettingsPayload({ config, currentWorkspace, sessionRegistered, canRegisterSession, env = process.env }) {
+  return {
+    config,
+    envOverrides: {
+      debounceSec: hasEnvDebounceOverride(env),
+      stopWaitDebounce: hasEnvStopWaitOverride(env),
+    },
+    currentWorkspace,
+    sessionRegistered,
+    canRegisterSession,
+  };
+}
+
+function settingsHandler(appData) {
+  return (data = {}) => {
+    const invalid = validateSettingsRequest(appData, data);
+    if (invalid) return invalid;
+    const sessionId = isValidSessionId(data.conversationId) ? data.conversationId : null;
+    let config = readFonsConfig(appData);
+    if (data.update !== undefined) {
+      const mutated = applySettingsMutation({ appData, sessionId, workspaceUris: data.workspaceUris, update: data.update });
+      if (mutated.error) return mutated.error;
+      config = mutated.config;
+    }
+    const entry = sessionId ? lookupConversation({ appData, sessionId }) : null;
+    const rootDir = resolveSettingsRootDir(entry, data.workspaceUris);
+    const currentWorkspace = buildCurrentWorkspaceInfo({ appData, config, rootDir, detectLocalPlugin: true });
+    const canRegisterSession = canRegisterCurrentSession({
+      sessionId, entry, workspaceUris: data.workspaceUris, currentWorkspace,
+    });
+    return formatSettingsPayload({
+      config, currentWorkspace, sessionRegistered: Boolean(entry), canRegisterSession,
+    });
+  };
+}
+
+function boundSettingsHandler(context) {
+  return (data = {}) => {
+    if (data.conversationId !== undefined && data.conversationId !== context.sessionId) {
+      return jsonError(403, '当前面板未绑定此会话。');
+    }
+    if (!validWorkspaceUris(data.workspaceUris)) return jsonError(400, '无效参数：workspaceUris');
+    if (hasWorkspaceMismatch(context, data.workspaceUris)) return jsonError(409, '当前会话与工作区状态不匹配。');
+    let config = readFonsConfig(context.appData);
+    if (data.update !== undefined) {
+      const updated = applySettingsPatch({ appData: context.appData, update: data.update, detectLocalPlugin: false });
+      if (updated.error) return updated.error;
+      config = updated.config;
+    }
+    const currentWorkspace = buildCurrentWorkspaceInfo({
+      appData: context.appData, config, rootDir: context.rootDir, detectLocalPlugin: false,
+    });
+    return formatSettingsPayload({
+      config, currentWorkspace, sessionRegistered: true, canRegisterSession: false, env: context.env,
+    });
+  };
+}
+
 export function mountPoolRoutes(app, appData, options) {
-  const bound = options === undefined ? null : bindSession(appData, options.boundSession);
+  const bound = options === undefined ? null : bindSession(appData, options.boundSession, options.env);
   const handlerFor = bound
     ? (action) => boundHandler(bound, action)
     : (action) => sessionHandler(appData, action);
   app.page('/', () => fs.readFileSync(page, 'utf8'));
   app.api('/api/pool', handlerFor(readPool), 'POST');
+  app.api('/api/pool/settings', bound ? boundSettingsHandler(bound) : settingsHandler(appData), 'POST');
   app.api('/api/pool/attachment', handlerFor(readAttachmentRoute), 'POST');
   for (const [name, [operation, fields]] of Object.entries(operations)) {
     app.api('/api/pool/' + name, handlerFor(mutate(operation, fields)), 'POST');
   }
+}
+
+export function createBoundPoolRoutes(boundSession, { env } = {}) {
+  const routes = new Map();
+  mountPoolRoutes({
+    page() {},
+    api(routePath, handle, method) {
+      if (method !== 'POST') throw new Error('Fons 面板只支持 POST 操作。');
+      routes.set(routePath, handle);
+    },
+  }, boundSession.appData, { boundSession, env });
+  return routes;
+}
+
+export function renderPoolBridgeHtml(helpers, entrypointCall) {
+  const view = fs.readFileSync(page, 'utf8');
+  if (!view.includes(SIDECAR_PRELOAD)) throw new Error('Fons pool preload script is missing.');
+  const bridge = helpers.map((helper) => helper.toString()).join('\n');
+  return view.replace(SIDECAR_PRELOAD, () => '<script>(() => {\n' + bridge
+    + '\n' + entrypointCall + '\n})();</script>');
 }
 
 function isEntryPoint() {

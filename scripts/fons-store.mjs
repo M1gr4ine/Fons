@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { resolveConfiguredDebounceMs, workspacePathKey } from './fons-config.mjs';
 import {
   COMPLETED_PREFIX, isCompletedLine, parseInbox, parseActiveItems, completedText,
   deliveryId, deliveryIdAfterRemovingCompletion,
@@ -365,6 +366,7 @@ function normalizeConversation(appData, entry) {
     registeredAt: entry.registeredAt,
     host: entry.host ?? 'antigravity',
     transcriptPath: entry.transcriptPath ?? null,
+    endedAt: typeof entry.endedAt === 'number' ? entry.endedAt : null,
   };
 }
 
@@ -385,6 +387,15 @@ export function registerConversation({
   return publishConversation(filePath, entry);
 }
 
+function mergeConversation(entry, changed) {
+  const next = { ...entry };
+  for (const [key, value] of Object.entries(changed)) {
+    if (value === undefined) delete next[key];
+    else next[key] = value;
+  }
+  return next;
+}
+
 function updateConversation({ appData, sessionId }, change) {
   const filePath = indexPath(appData, sessionId);
   if (!fs.existsSync(filePath) || !change(readJson(filePath))) return;
@@ -392,7 +403,7 @@ function updateConversation({ appData, sessionId }, change) {
     const entry = readJson(filePath);
     const changed = change(entry);
     if (!changed) return;
-    writeJsonAtomic(filePath, { ...entry, ...changed });
+    writeJsonAtomic(filePath, mergeConversation(entry, changed));
   });
 }
 
@@ -406,10 +417,22 @@ export function backfillConversationTitle({ appData, sessionId, title, transcrip
   });
 }
 
-export function bindConversationTranscript({ appData, sessionId, transcriptPath, expectedTranscriptPath = null }) {
+export function bindConversationTranscript({
+  appData, sessionId, transcriptPath, expectedTranscriptPath = null, host = 'codex',
+}) {
   updateConversation({ appData, sessionId }, (entry) => {
-    if (entry.host !== 'codex' || (entry.transcriptPath ?? null) !== expectedTranscriptPath) return null;
+    if (entry.host !== host || (entry.transcriptPath ?? null) !== expectedTranscriptPath) return null;
     return { transcriptPath };
+  });
+}
+
+export function markConversationLifecycle({ appData, sessionId, host, endedAt }) {
+  const nextEndedAt = typeof endedAt === 'number' ? endedAt : null;
+  updateConversation({ appData, sessionId }, (entry) => {
+    if (host && entry.host !== host) return null;
+    const currentEndedAt = typeof entry.endedAt === 'number' ? entry.endedAt : null;
+    if (currentEndedAt === nextEndedAt) return null;
+    return { endedAt: nextEndedAt ?? undefined };
   });
 }
 
@@ -419,16 +442,10 @@ export function lookupConversation({ appData, sessionId }) {
   return normalizeConversation(appData, readJson(filePath));
 }
 
-function workspaceKey(rootDir) {
-  const resolved = path.resolve(rootDir);
-  if (process.platform === 'win32') return resolved.toLowerCase();
-  return resolved;
-}
-
 export function listConversations({ appData, rootDir, scope = 'workspace' }) {
   const directory = path.join(appData, 'fons', 'conversations');
   if (!fs.existsSync(directory)) return [];
-  const workspace = scope === 'workspace' ? workspaceKey(rootDir) : null;
+  const workspace = scope === 'workspace' ? workspacePathKey(rootDir) : null;
   return fs.readdirSync(directory).filter((name) => name.endsWith('.json'))
     .map((name) => ({ name, sessionId: name.slice(0, -5) }))
     .filter(({ sessionId }) => isValidSessionId(sessionId))
@@ -438,7 +455,7 @@ export function listConversations({ appData, rootDir, scope = 'workspace' }) {
     })
     .filter((entry) => {
       if (!entry || entry.scope !== scope) return false;
-      return scope === 'no-workspace' || workspaceKey(entry.rootDir) === workspace;
+      return scope === 'no-workspace' || workspacePathKey(entry.rootDir) === workspace;
     });
 }
 
@@ -520,14 +537,10 @@ export function readPoolData({ rootDir, fonsDir, sessionId }) {
   return { paths, content, archive, state, ui, rows, items, etag, mtimeMs };
 }
 
-const DEFAULT_DEBOUNCE_SEC = 45;
 const HOLD_LEASE_MS = 15000;
 
-export function resolveDebounceMs() {
-  const raw = process.env.FONS_DEBOUNCE_SEC;
-  if (raw === undefined || raw.trim() === '') return DEFAULT_DEBOUNCE_SEC * 1000;
-  const seconds = Number(raw);
-  return (Number.isFinite(seconds) && seconds >= 0 ? seconds : DEFAULT_DEBOUNCE_SEC) * 1000;
+export function resolveDebounceMs(appData = null) {
+  return resolveConfiguredDebounceMs({ appData });
 }
 
 function resolveItemSince(id, state, ui, mtimeMs) {
@@ -560,7 +573,7 @@ function evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now, editin
 }
 
 export function computeDebounce({
-  items, state, ui, mtimeMs, debounceMs = resolveDebounceMs(), now = Date.now(), editingHoldPolicy,
+  items, state, ui, mtimeMs, appData = null, debounceMs = resolveDebounceMs(appData), now = Date.now(), editingHoldPolicy,
 }) {
   const uniqueItems = new Map();
   for (const item of items) {
@@ -609,7 +622,9 @@ const stampExistingPoolTimers = poolWriter(({ rootDir, fonsDir, sessionId, fresh
   }
 });
 
-export function readPoolSnapshot({ rootDir, fonsDir, sessionId, debounceMs = resolveDebounceMs(), now = Date.now() }) {
+export function readPoolSnapshot({
+  rootDir, fonsDir, sessionId, appData = null, debounceMs = resolveDebounceMs(appData), now = Date.now(),
+}) {
   const data = readPoolData({ rootDir, fonsDir, sessionId });
   const timing = computeDebounce({ ...data, debounceMs, now });
   const items = data.items.map((item) => {
@@ -617,7 +632,8 @@ export function readPoolSnapshot({ rootDir, fonsDir, sessionId, debounceMs = res
     return { ...item, remainingMs: info ? info.remainingMs : 0, editingHold: Boolean(info?.editingHold) };
   });
   const heldIds = [...timing.byId.entries()].filter(([, info]) => info.editingHold).map(([id]) => id).sort().join(',');
-  const etag = heldIds ? `${data.etag}|hold:${heldIds}` : data.etag;
+  const baseTag = `${data.etag}|db:${timing.debounceMs}`;
+  const etag = heldIds ? `${baseTag}|hold:${heldIds}` : baseTag;
   return {
     items, debounceMs: timing.debounceMs,
     canArchive: items.some((item) => item.status === 'done'), etag,

@@ -37,8 +37,28 @@ function harness({ host = true, secureFetch = true, now } = {}) {
     '.rows', '.empty', '[data-testid="fons-quick-add"]', '[data-testid="fons-quick-box"]',
     '[data-testid="fons-quick-drafts"]', '[data-testid="fons-attach"]', '[data-testid="fons-file-input"]',
     '[data-testid="fons-quick-submit"]', '[data-testid="fons-drop-banner"]', '[data-testid="fons-lightbox"]',
-    '[data-testid="fons-flow-mode"]', '[data-testid="fons-archive"]', '.notice', '.pool',
+    '[data-testid="fons-settings-toggle"]', '[data-testid="fons-settings-backdrop"]',
+    '[data-testid="fons-settings-panel"]', '[data-testid="fons-settings-close"]', '[data-testid="fons-settings-error"]',
+    '[data-testid="fons-flow-up"]', '[data-testid="fons-flow-right"]',
+    '[data-testid="fons-debounce-sec"]', '[data-testid="fons-debounce-hint"]',
+    '[data-testid="fons-debounce-preset-0"]', '[data-testid="fons-debounce-preset-15"]',
+    '[data-testid="fons-debounce-preset-45"]', '[data-testid="fons-debounce-preset-90"]',
+    '[data-testid="fons-stop-wait"]', '[data-testid="fons-stop-wait-hint"]',
+    '[data-testid="fons-auto-attach"]', '[data-testid="fons-current-workspace"]',
+    '[data-testid="fons-current-ws-name"]', '[data-testid="fons-current-ws-status"]',
+    '[data-testid="fons-current-ws-path"]', '[data-testid="fons-current-ws-toggle"]',
+    '[data-testid="fons-register-session"]', '[data-testid="fons-workspace-rules"]',
+    '[data-testid="fons-workspace-list"]',
+    '[data-testid="fons-archive"]', '.notice', '.pool',
   ]) elements.set(selector, new Element());
+  elements.get('[data-testid="fons-settings-panel"]').hidden = true;
+  elements.get('[data-testid="fons-settings-backdrop"]').hidden = true;
+  elements.get('[data-testid="fons-settings-error"]').hidden = true;
+  elements.get('[data-testid="fons-register-session"]').hidden = true;
+  elements.get('[data-testid="fons-workspace-rules"]').hidden = true;
+  for (const preset of [0, 15, 45, 90]) {
+    elements.get(`[data-testid="fons-debounce-preset-${preset}"]`).dataset.debouncePreset = String(preset);
+  }
   const lightbox = elements.get('[data-testid="fons-lightbox"]');
   lightbox.hidden = true;
   const lightboxImg = new Element();
@@ -341,17 +361,20 @@ test('archive notice does not leak across a session switch during refresh', asyn
   await settle();
 });
 
-test('waterline flow toggle switches between upward and rightward water transforms and persists choice', async () => {
+test('waterline flow toggle inside settings switches between upward and rightward water transforms and persists choice', async () => {
   const panel = harness();
   await openRegistered(panel);
   const [row] = panel.elements.get('.rows').children;
   const water = row.querySelector('.row-water');
   assert.equal(panel.elements.get('.pool').dataset.flow, 'up');
   assert.match(water.style.transform, /^scaleY\(/);
-  panel.elements.get('[data-testid="fons-flow-mode"]').listeners.click();
+  panel.elements.get('[data-testid="fons-flow-right"]').listeners.click();
   assert.equal(panel.elements.get('.pool').dataset.flow, 'right');
   assert.equal(panel.storage.get('fons.waterFlow'), 'right');
   assert.match(water.style.transform, /^scaleX\(/);
+  panel.elements.get('[data-testid="fons-flow-up"]').listeners.click();
+  assert.equal(panel.elements.get('.pool').dataset.flow, 'up');
+  assert.equal(panel.storage.get('fons.waterFlow'), 'up');
 });
 
 test('an in-flight old edit conflict cannot notify the newly active conversation', async () => {
@@ -835,6 +858,154 @@ test('countdown timer ticks every 1s independently of the 2s backend poll interv
 
   panel.document.hidden = false;
   panel.document.listeners.visibilitychange();
-  assert.equal(timer.textContent, '28s', 'becoming visible snaps countdown immediately');
+  assert.equal(panel.elements.get('.rows').children[0].querySelector('.row-timer').textContent, '28s', 'becoming visible snaps countdown immediately');
   assert.equal(panel.requests.length, 2);
+});
+
+test('settings popover loads parameters, saves debounce/stopWait/workspace changes, and registers unregistered sessions', async () => {
+  const panel = harness();
+  panel.workspace(['file:///F:/vcdeslop']);
+  await settle();
+  assert.equal(panel.requests[0].url, '/api/pool');
+  panel.requests[0].resolve(response({ registered: false }));
+  await settle();
+  assert.match(panel.elements.get('.empty').textContent, /未登记/);
+
+  // Opening settings fetches /api/pool/settings even while session is unregistered
+  panel.elements.get('[data-testid="fons-settings-toggle"]').listeners.click();
+  await settle();
+  assert.equal(panel.elements.get('[data-testid="fons-settings-panel"]').hidden, false);
+  assert.equal(panel.requests[1].url, '/api/pool/settings');
+  const settingsData = (overrides = {}) => ({
+    config: {
+      debounceSec: 45,
+      stopWaitDebounce: false,
+      autoAttachWorkspaces: true,
+      enabledWorkspaces: [],
+      disabledWorkspaces: [],
+      ...overrides.config,
+    },
+    envOverrides: { debounceSec: false, stopWaitDebounce: false },
+    currentWorkspace: {
+      path: 'F:\\vcdeslop',
+      name: 'vcdeslop',
+      enabled: true,
+      localPlugin: false,
+      explicitState: 'default',
+      ...overrides.currentWorkspace,
+    },
+    sessionRegistered: false,
+    canRegisterSession: true,
+    ...overrides.top,
+  });
+  panel.requests[1].resolve(response(settingsData()));
+  await settle();
+  assert.equal(panel.elements.get('[data-testid="fons-debounce-sec"]').value, '45');
+  assert.equal(panel.elements.get('[data-testid="fons-current-ws-name"]').textContent, 'vcdeslop');
+  assert.equal(panel.elements.get('[data-testid="fons-register-session"]').hidden, false);
+
+  // Clicking 0s preset saves debounceSec: 0 and refreshes pool
+  panel.elements.get('[data-testid="fons-debounce-preset-0"]').listeners.click();
+  await settle();
+  assert.equal(panel.requests[2].url, '/api/pool/settings');
+  assert.deepEqual(JSON.parse(panel.requests[2].options.body).update, { debounceSec: 0 });
+  panel.requests[2].resolve(response(settingsData({ config: { debounceSec: 0 } })));
+  await settle();
+  assert.equal(panel.requests[3].url, '/api/pool');
+  panel.requests[3].resolve(response({ registered: false }));
+  await settle();
+
+  // Toggling stopWaitDebounce saves immediately
+  const stopWait = panel.elements.get('[data-testid="fons-stop-wait"]');
+  stopWait.checked = true;
+  stopWait.listeners.change();
+  await settle();
+  assert.deepEqual(JSON.parse(panel.requests[4].options.body).update, { stopWaitDebounce: true });
+  panel.requests[4].resolve(response(settingsData({ config: { debounceSec: 0, stopWaitDebounce: true } })));
+  await settle();
+  panel.requests[5].resolve(response({ registered: false }));
+  await settle();
+
+  // Disabling current workspace updates workspaceDisabled empty state
+  panel.elements.get('[data-testid="fons-current-ws-toggle"]').listeners.click();
+  await settle();
+  assert.deepEqual(JSON.parse(panel.requests[6].options.body).update, {
+    workspaceAction: { path: 'F:\\vcdeslop', mode: 'disable' },
+  });
+  panel.requests[6].resolve(response(settingsData({
+    config: { debounceSec: 0, stopWaitDebounce: true, disabledWorkspaces: ['F:\\vcdeslop'] },
+    currentWorkspace: { enabled: false, explicitState: 'disabled' },
+    top: { canRegisterSession: false },
+  })));
+  await settle();
+  panel.requests[7].resolve(response({ registered: false, workspaceDisabled: true }));
+  await settle();
+  assert.match(panel.elements.get('.empty').textContent, /已停用/);
+  assert.equal(panel.elements.get('[data-testid="fons-workspace-rules"]').hidden, false);
+  assert.equal(panel.elements.get('[data-testid="fons-workspace-list"]').children.length, 1);
+
+  // Re-enabling an unregistered workspace sends enable + registerCurrentSession in one click
+  panel.elements.get('[data-testid="fons-current-ws-toggle"]').listeners.click();
+  await settle();
+  assert.deepEqual(JSON.parse(panel.requests[8].options.body).update, {
+    workspaceAction: { path: 'F:\\vcdeslop', mode: 'enable' },
+    registerCurrentSession: true,
+  });
+  panel.requests[8].resolve(response(settingsData({
+    config: { debounceSec: 0, stopWaitDebounce: true, disabledWorkspaces: [] },
+    currentWorkspace: { enabled: true, explicitState: 'default' },
+    top: { sessionRegistered: true, canRegisterSession: false },
+  })));
+  await settle();
+  panel.requests[9].resolve(response({ ...snapshot('立即登记成功'), debounceMs: 0 }));
+  await settle();
+  assert.equal(panel.elements.get('[data-testid="fons-quick-add"]').disabled, false);
+  assert.equal(panel.elements.get('.rows').children.length, 1);
+
+  // Escape closes settings popover
+  panel.document.listeners.keydown({ key: 'Escape', preventDefault() {} });
+  assert.equal(panel.elements.get('[data-testid="fons-settings-panel"]').hidden, true);
+
+  // Invalid debounce input resets to saved value and surfaces inline error without sending request
+  const beforeInvalid = panel.requests.length;
+  const debounceInput = panel.elements.get('[data-testid="fons-debounce-sec"]');
+  debounceInput.value = '-3';
+  debounceInput.listeners.change();
+  assert.equal(panel.requests.length, beforeInvalid);
+  assert.equal(debounceInput.value, '0');
+  assert.equal(panel.elements.get('[data-testid="fons-settings-error"]').hidden, false);
+
+  // Workspace rule remove button resets rule via settings API
+  panel.elements.get('[data-testid="fons-settings-toggle"]').listeners.click();
+  await settle();
+  const reloadReq = panel.requests.at(-1);
+  reloadReq.resolve(response(settingsData({
+    config: { debounceSec: 0, disabledWorkspaces: ['F:\\other'] },
+    top: { sessionRegistered: true, canRegisterSession: false },
+  })));
+  await settle();
+  const [ruleRow] = panel.elements.get('[data-testid="fons-workspace-list"]').children;
+  ruleRow.querySelector('.ws-rule-remove').listeners.click();
+  await settle();
+  assert.deepEqual(JSON.parse(panel.requests.at(-1).options.body).update, {
+    workspaceAction: { path: 'F:\\other', mode: 'reset' },
+  });
+  panel.requests.at(-1).resolve(response(settingsData({
+    config: { debounceSec: 0, disabledWorkspaces: [] },
+    top: { sessionRegistered: true, canRegisterSession: false },
+  })));
+  await settle();
+  panel.requests.at(-1).resolve(response({ ...snapshot('已恢复'), debounceMs: 0 }));
+  await settle();
+
+  // Switching workspace clears stale settingsData so failed reload cannot target the old workspace
+  panel.workspace(['file:///F:/another']);
+  await settle();
+  panel.requests.at(-1).resolve(response({ registered: false }));
+  await settle();
+  panel.elements.get('[data-testid="fons-settings-toggle"]').listeners.click();
+  await settle();
+  panel.requests.at(-1).resolve(response({ error: '读取失败' }, 500));
+  await settle();
+  assert.equal(panel.elements.get('[data-testid="fons-current-ws-toggle"]').disabled, true);
 });

@@ -3,17 +3,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { formatRetractedIdea } from "../scripts/fons-inbox.mjs";
+import { isWorkspaceEnabled } from "../scripts/fons-config.mjs";
 import { executePoolEvent, extractAckTokensFromText } from "../scripts/fons-engine.mjs";
 import {
   backfillConversationTitle, bindConversationTranscript, isValidSessionId, lookupConversation, readJson,
   registerConversation, sessionPaths, withPoolWrite,
 } from "../scripts/fons-store.mjs";
+import {
+  absolutePath, asIdentifier, findMarkedWorkspace, formatDeliveredLine, matchesScope, matchesTranscriptAnchor,
+  pathKey, standardPoolPolicy, withLockFallback,
+} from "./shared.mjs";
 
 const HOST = "codex";
 const HOOK_EVENTS = new Set(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]);
 const START_SOURCES = new Set(["startup", "resume", "clear", "compact", "fork"]);
-const MISSING_PATH = new Set(["ENOENT", "ENOTDIR"]);
-const UNREADABLE_LOG = new Set([...MISSING_PATH, "EACCES", "EPERM", "EISDIR"]);
+const UNREADABLE_LOG = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM", "EISDIR"]);
 const START_EVENTS = new Set(["task_started", "turn_started"]);
 const ABORT_EVENTS = new Set(["turn_aborted", "TurnAborted"]);
 const INTERRUPTED = new Set(["interrupted", "aborted", "user_interrupt", "user_interrupted", "turn_aborted"]);
@@ -25,51 +29,13 @@ const ACK_HINT = "[FONS] 完成后末行附 [FONS_ACK: 编号]（勿改收件箱
 const STOP_HEADER = "[FONS 收尾核对] 以下补充待处理";
 const RETRACTION_HEADER = "[FONS 撤回] 用户已撤回以下补充，若尚未执行请跳过：";
 
-export function codexAppData(env = process.env, homeDir = os.homedir()) {
-  return path.resolve(env.CODEX_HOME || path.join(homeDir, ".codex"));
-}
-
-function withoutDevicePrefix(value) {
-  if (process.platform !== "win32") return value;
-  if (value.toUpperCase().startsWith("\\\\?\\UNC\\")) return "\\\\" + value.slice(8);
-  if (/^\\\\\?\\[a-z]:\\/i.test(value)) return value.slice(4);
-  return value;
-}
-
-function absolutePath(value) {
-  if (typeof value !== "string" || value.includes("\0") || !path.isAbsolute(value)) return null;
-  const resolved = path.resolve(withoutDevicePrefix(value));
-  try {
-    return withoutDevicePrefix(fs.realpathSync.native(resolved));
-  } catch (error) {
-    if (MISSING_PATH.has(error.code)) return resolved;
-    throw error;
-  }
-}
-
-function pathKey(value) {
-  if (process.platform === "win32") return value?.toLowerCase() ?? null;
-  return value;
+export function codexAppData(env = process.env, homeDir = os.homedir(), cwd = process.cwd()) {
+  const configured = env.CODEX_HOME?.trim();
+  return configured ? path.resolve(cwd, configured) : path.resolve(homeDir, ".codex");
 }
 
 export function findCodexWorkspace(cwd, homeDir = os.homedir()) {
-  const home = pathKey(absolutePath(homeDir));
-  let directory = absolutePath(cwd);
-  while (directory) {
-    const parent = path.dirname(directory);
-    if (directory === parent || pathKey(directory) === home) break;
-    if (MARKERS.some((marker) => fs.existsSync(path.join(directory, marker)))) return directory;
-    directory = parent;
-  }
-  return null;
-}
-
-function matchesScope(scopeMode, scope) {
-  return scopeMode === "all" || scopeMode === scope;
-}
-
-function asIdentifier(value) {
-  return typeof value === "string" && value.trim() ? value : null;
+  return findMarkedWorkspace(cwd, MARKERS, homeDir);
 }
 
 function readRollout(filePath, read) {
@@ -183,12 +149,13 @@ function registerStart(input, scopeMode, context) {
   if (meta && !validRootMetadata(meta, context.sessionId)) return;
   const rootDir = findCodexWorkspace(input.cwd);
   const scope = rootDir ? "workspace" : "no-workspace";
-  if (matchesScope(scopeMode, scope)) registerConversation({ ...context, rootDir, scope, host: HOST });
+  if (!matchesScope(scopeMode, scope)) return;
+  if (scope === "workspace" && !isWorkspaceEnabled({ appData: context.appData, rootDir })) return;
+  registerConversation({ ...context, rootDir, scope, host: HOST });
 }
 
 function matchesAnchor(entry, context, scopeMode) {
-  return entry?.host === HOST && matchesScope(scopeMode, entry.scope) &&
-    Boolean(entry.transcriptPath) && pathKey(entry.transcriptPath) === pathKey(context.transcriptPath);
+  return matchesTranscriptAnchor({ entry, context, scopeMode, host: HOST });
 }
 
 function digestLine(line) {
@@ -300,21 +267,6 @@ function poolEvent(input, context, paths) {
   return event;
 }
 
-function quotePath(filename) {
-  const backticks = String.fromCharCode(96);
-  const runs = filename.match(/\x60+/g) ?? [];
-  const delimiter = backticks.repeat(1 + Math.max(0, ...runs.map((run) => run.length)));
-  return delimiter + filename + delimiter;
-}
-
-function formatDeliveredLine({ text, note, attachments, readded }, paths, scope) {
-  const suffix = readded ? "（重新添加）" : "";
-  if (!attachments.length) return text + suffix;
-  const names = attachments.map(({ storedName }) => quotePath(path.resolve(paths.attachmentsDir, storedName)));
-  const sandbox = scope === "no-workspace" ? "；无项目附件位于沙箱外，可能受读取限制" : "";
-  return (note || "请结合附件处理") + suffix + "（附件: " + names.join(", ") + sandbox + "）";
-}
-
 function formatMessages(result, paths, { scope, sessionId }) {
   const messages = [];
   if (result.retractions.length) {
@@ -322,7 +274,7 @@ function formatMessages(result, paths, { scope, sessionId }) {
   }
   if (result.deliveries.length) {
     const numbered = result.deliveries.map((item, index) =>
-      (index + 1) + ". " + formatDeliveredLine(item, paths, scope) + " [FONS:" + item.ackToken + "]"
+      (index + 1) + ". " + formatDeliveredLine(item, paths, { scope }) + " [FONS:" + item.ackToken + "]"
     ).join("\n");
     const heading = result.kind === "continue" ? STOP_HEADER + "\n" + ACK_HINT : ACK_HINT;
     messages.push(heading + "\n" + numbered);
@@ -339,6 +291,7 @@ function encodeResult(result, eventName, paths, context) {
 }
 
 function handlePoolHook(input, context) {
+  if (context.scope === "workspace" && !isWorkspaceEnabled({ appData: context.appData, rootDir: context.rootDir })) return {};
   const eventName = input.hook_event_name;
   if (eventName === "UserPromptSubmit") backfillConversationTitle({ ...context, title: input.prompt });
   const paths = sessionPaths(context);
@@ -346,12 +299,7 @@ function handlePoolHook(input, context) {
   if (!inbox?.size && !fs.existsSync(paths.retractMarker)) return {};
   const event = poolEvent(input, context, paths);
   if (!event) return {};
-  const policy = {
-    rotateTokenOnStopRetry: false,
-    earlyDeliverBufferingOnStop: process.env.FONS_STOP_WAIT_DEBOUNCE !== "1",
-    ackHintPolicy: "never",
-    editingHoldPolicy: "always",
-  };
+  const policy = standardPoolPolicy({ appData: context.appData });
   return encodeResult(executePoolEvent(context, { ...event, transcriptPath: context.transcriptPath }, policy), eventName, paths, context);
 }
 
@@ -369,11 +317,5 @@ function applyHook(input, scopeMode) {
 }
 
 export function evaluateCodexHook(input, scopeMode) {
-  try {
-    return applyHook(input, scopeMode);
-  } catch (error) {
-    if (error.code !== "FONS_POOL_LOCK") throw error;
-    process.stderr.write("[FONS] 无法取得会话收件箱写入锁，已保留待办。\n");
-    return {};
-  }
+  return withLockFallback(() => applyHook(input, scopeMode));
 }

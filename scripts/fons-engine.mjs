@@ -103,13 +103,19 @@ function syncPendingLedger(state, pendingAt, deliveries = []) {
   else delete state.pendingAt;
 }
 
+function selectBatch(policy, batch) {
+  if (!policy.limitBatch) return { items: batch.items, retractions: batch.retractions };
+  return policy.limitBatch(batch);
+}
+
 function handleDelivery(data, event, policy, { ready, pendingAt }) {
   const { state, ui } = data;
-  const deliveries = markDelivered(ready, data, event, policy);
+  const batch = selectBatch(policy, { kind: "delivery", items: ready, retractions: unnotified(ui, state), ui });
+  const deliveries = markDelivered(batch.items, data, event, policy);
   const sendAckHint = deliveries.length > 0 && policy.ackHintPolicy === "once" && !state.ackHintSent;
   if (sendAckHint) state.ackHintSent = true;
   syncPendingLedger(state, pendingAt, deliveries);
-  return { kind: "delivery", deliveries, sendAckHint, retractions: collectRetractions(state, unnotified(ui, state)) };
+  return { kind: "delivery", deliveries, sendAckHint, retractions: collectRetractions(state, batch.retractions) };
 }
 
 function acknowledgedIds({ state, items }, tokens) {
@@ -133,8 +139,17 @@ function settleAcknowledged(data, ids) {
   }
 }
 
+function consumeMessageAcknowledgment(state, { message, tokens }) {
+  if (!Object.keys(state.delivered ?? {}).length) return new Set();
+  const previous = state.lastAckedStopMessage;
+  if (previous?.promptId === message.promptId && previous?.digest === message.digest) return new Set();
+  state.lastAckedStopMessage = message;
+  return tokens;
+}
+
 function consumeAcknowledgment(state, { ackTokens, acknowledgment }) {
   if (!acknowledgment) return ackTokens ?? new Set();
+  if (acknowledgment.message) return consumeMessageAcknowledgment(state, acknowledgment);
   const { cursor, previousCursorKey, tokens } = acknowledgment;
   const previous = state.lastAckedStopCursor;
   if (JSON.stringify(previous ?? null) !== previousCursorKey) return new Set();
@@ -202,16 +217,16 @@ function handleStop(data, event, policy, timing) {
   const acknowledged = acknowledgedIds(data, consumeAcknowledgment(state, event));
   const open = data.items.filter((item) => !acknowledged.has(item.id) && canDeliverAtStop(item, timing, policy));
   const remaining = [...new Map(open.map((item) => [item.id, item])).values()];
-  const pendingRetractions = unnotified(ui, state);
-  const shouldContinue = reserveContinuation(data, remaining, pendingRetractions, event);
+  const batch = selectBatch(policy, { kind: "stop", items: remaining, retractions: unnotified(ui, state), ui });
+  const shouldContinue = reserveContinuation(data, batch.items, batch.retractions, event);
   // Allocate every new token before writing confirmed ACKs back into the inbox.
-  const deliveries = shouldContinue ? markDelivered(remaining, data, event, policy) : [];
+  const deliveries = shouldContinue ? markDelivered(batch.items, data, event, policy) : [];
   settleAcknowledged(data, acknowledged);
   syncPendingLedger(state, timing.pendingAt, deliveries);
   if (!shouldContinue) return { kind: "allow" };
 
   if (policy.ackHintPolicy === "once") state.ackHintSent = true;
-  return { kind: "continue", deliveries, retractions: collectRetractions(state, pendingRetractions) };
+  return { kind: "continue", deliveries, retractions: collectRetractions(state, batch.retractions) };
 }
 
 function claimToolEvent(state, key) {
@@ -226,7 +241,8 @@ function claimToolEvent(state, key) {
 function applyPoolEvent(data, event, policy, prepareDeliveries) {
   const before = JSON.stringify(data.state);
   if (!claimToolEvent(data.state, event.toolEventKey)) return { kind: "allow" };
-  const timing = computeDebounce({ ...data, editingHoldPolicy: policy.editingHoldPolicy });
+  if (event.rememberPromptId) data.state.lastPromptId = event.rememberPromptId;
+  const timing = computeDebounce({ ...data, appData: data.appData, editingHoldPolicy: policy.editingHoldPolicy });
   const result = event.kind === "stop" ? handleStop(data, event, policy, timing) : handleDelivery(data, event, policy, timing);
   // Prepare the selected delivery before publishing it in the ledger.
   if (result.deliveries?.length) prepareDeliveries?.(result.deliveries);
@@ -235,10 +251,17 @@ function applyPoolEvent(data, event, policy, prepareDeliveries) {
   return result;
 }
 
+function sameTranscriptPath(left, right) {
+  if (process.platform === "win32") return left?.toLowerCase() === right?.toLowerCase();
+  return left === right;
+}
+
 export function executePoolEvent(context, event, policy, prepareDeliveries) {
   return withPoolWrite(context, () => {
     // An authorized re-anchor is published under this same pool lock.
-    if (event.transcriptPath && lookupConversation(context)?.transcriptPath !== event.transcriptPath) return { kind: "allow" };
-    return applyPoolEvent(readPoolData(context), event, policy, prepareDeliveries);
+    if (event.transcriptPath && !sameTranscriptPath(lookupConversation(context)?.transcriptPath, event.transcriptPath)) {
+      return { kind: "allow" };
+    }
+    return applyPoolEvent({ ...readPoolData(context), appData: context.appData }, event, policy, prepareDeliveries);
   });
 }

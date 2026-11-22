@@ -117,12 +117,336 @@
       border-color: var(--border);
     }
     .bar button:not(:disabled):active { transform: scale(0.97); }
-    .flow-toggle {
+    .settings-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
       color: var(--muted-foreground);
-      font-size: 11px !important;
+      font-size: 11.5px !important;
       padding: 2px 7px !important;
     }
-    .flow-toggle:hover { color: var(--foreground); }
+    .settings-toggle svg {
+      width: 13px;
+      height: 13px;
+      flex: none;
+    }
+    .settings-toggle:hover,
+    .settings-toggle[aria-expanded="true"] {
+      color: var(--foreground);
+    }
+    .settings-toggle[aria-expanded="true"] {
+      color: var(--primary);
+      background: var(--accent-soft);
+      border-color: var(--accent-ring);
+    }
+
+    /* Settings Popover */
+    .settings-backdrop {
+      position: absolute;
+      inset: 43px 0 0 0;
+      z-index: 20;
+      background: color-mix(in srgb, var(--background) 38%, transparent);
+      backdrop-filter: blur(1.5px);
+    }
+    .settings-panel {
+      position: absolute;
+      top: 48px;
+      left: 8px;
+      right: 8px;
+      max-height: calc(100% - 56px);
+      overflow-y: auto;
+      z-index: 21;
+      padding: 10px 12px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--background);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      animation: fadeSlide 140ms ease-out;
+    }
+    .settings-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .settings-head h2 {
+      margin: 0;
+      font-size: 12.5px;
+      font-weight: 600;
+    }
+    .settings-close {
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      font-size: 15px;
+      line-height: 20px;
+      text-align: center;
+      color: var(--muted-foreground);
+    }
+    .settings-close:hover {
+      color: var(--foreground);
+      background: var(--surface-hover);
+    }
+    .settings-section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      padding-top: 9px;
+      border-top: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+    }
+    .settings-section:first-of-type {
+      padding-top: 2px;
+      border-top: 0;
+    }
+    .settings-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--muted-foreground);
+      letter-spacing: 0.02em;
+    }
+    .settings-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .settings-label-col {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      min-width: 0;
+    }
+    .settings-label {
+      font-size: 12px;
+      line-height: 1.35;
+      color: var(--foreground);
+    }
+    .settings-hint {
+      font-size: 11px;
+      line-height: 1.35;
+      color: var(--muted-foreground);
+    }
+    .settings-seg {
+      display: inline-flex;
+      gap: 4px;
+      padding: 2px;
+      border-radius: 7px;
+      background: var(--surface-hover);
+      border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+    }
+    .seg-btn {
+      font-size: 11px;
+      line-height: 18px;
+      padding: 2px 8px;
+      border-radius: 5px;
+      border: 1px solid transparent;
+      color: var(--muted-foreground);
+      white-space: nowrap;
+      transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+    }
+    .seg-btn:hover { color: var(--foreground); }
+    .seg-btn[data-active="true"] {
+      color: var(--primary);
+      background: var(--background);
+      border-color: var(--accent-ring);
+      font-weight: 500;
+    }
+    .debounce-input-wrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      flex: none;
+    }
+    .debounce-input {
+      width: 64px;
+      padding: 2px 6px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--background);
+      color: var(--foreground);
+      font-size: 12px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .debounce-unit {
+      font-size: 11.5px;
+      color: var(--muted-foreground);
+    }
+    .preset-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+    }
+    .preset-chip {
+      font-size: 11px;
+      line-height: 18px;
+      padding: 1px 8px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+      color: var(--muted-foreground);
+      background: var(--surface-hover);
+      font-variant-numeric: tabular-nums;
+    }
+    .preset-chip:hover { color: var(--foreground); border-color: var(--border); }
+    .preset-chip[data-active="true"] {
+      color: var(--primary);
+      background: var(--accent-soft);
+      border-color: var(--accent-ring);
+    }
+    .fons-switch {
+      appearance: none;
+      -webkit-appearance: none;
+      position: relative;
+      width: 30px;
+      height: 17px;
+      margin: 0;
+      flex: none;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--muted);
+      cursor: pointer;
+      transition: background-color 160ms ease, border-color 160ms ease;
+    }
+    .fons-switch::after {
+      content: "";
+      position: absolute;
+      top: 1.5px;
+      left: 1.5px;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--background);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
+      transition: transform 160ms ease;
+    }
+    .fons-switch:checked {
+      background: var(--primary);
+      border-color: var(--primary);
+    }
+    .fons-switch:checked::after {
+      transform: translateX(13px);
+    }
+    .ws-card {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px 9px;
+      border-radius: 8px;
+      border: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
+      background: color-mix(in srgb, var(--muted) 36%, transparent);
+    }
+    .ws-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      min-width: 0;
+    }
+    .ws-name {
+      font-size: 12px;
+      font-weight: 600;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ws-badge {
+      flex: none;
+      font-size: 10.5px;
+      line-height: 16px;
+      padding: 0 6px;
+      border-radius: 999px;
+      color: var(--muted-foreground);
+      background: var(--surface-hover);
+      border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+    }
+    .ws-badge[data-state="enabled"] {
+      color: var(--primary);
+      background: var(--accent-soft);
+      border-color: var(--accent-ring);
+    }
+    .ws-path {
+      font-size: 10.5px;
+      line-height: 1.35;
+      color: var(--muted-foreground);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ws-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .ws-btn {
+      font-size: 11.5px;
+      line-height: 20px;
+      padding: 2px 9px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--background);
+      color: var(--foreground);
+    }
+    .ws-btn:not(:disabled):hover {
+      background: var(--surface-hover);
+    }
+    .ws-btn-primary {
+      border-color: var(--accent-ring);
+      background: var(--accent-soft);
+      color: var(--primary);
+      font-weight: 500;
+    }
+    .ws-btn-primary:not(:disabled):hover {
+      background: color-mix(in srgb, var(--primary) 20%, transparent);
+    }
+    .ws-rule-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .ws-rule-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 7px;
+      border-radius: 6px;
+      background: var(--surface-hover);
+      min-width: 0;
+    }
+    .ws-rule-name {
+      flex: 1;
+      min-width: 0;
+      font-size: 11.5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ws-rule-tag {
+      flex: none;
+      font-size: 10.5px;
+      color: var(--muted-foreground);
+    }
+    .ws-rule-remove {
+      flex: none;
+      font-size: 11px;
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--muted-foreground);
+    }
+    .ws-rule-remove:hover {
+      color: var(--error);
+      background: color-mix(in srgb, var(--error) 12%, transparent);
+    }
+    .settings-error {
+      font-size: 11.5px;
+      color: var(--error);
+      padding: 5px 8px;
+      border-radius: 6px;
+      background: color-mix(in srgb, var(--error) 10%, transparent);
+    }
 
     /* Banners */
     .notice {
@@ -742,9 +1066,84 @@
         <h1>灵感池</h1>
         <span class="pool-count" hidden></span>
       </div>
-      <button type="button" class="flow-toggle" data-testid="fons-flow-mode">↑ 水位</button>
+      <button type="button" class="settings-toggle" data-testid="fons-settings-toggle" aria-expanded="false" aria-controls="fons-settings-panel" title="灵感池设置">
+        <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.35"/>
+          <path d="M8 1.9v1.55M8 12.55v1.55M1.9 8h1.55M12.55 8h1.55M3.68 3.68l1.1 1.1M11.22 11.22l1.1 1.1M12.32 3.68l-1.1 1.1M4.78 11.22l-1.1 1.1" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>
+        </svg>
+        <span>设置</span>
+      </button>
       <button type="button" data-testid="fons-archive" title="收拢并归档已完成灵感">归档</button>
     </header>
+    <div class="settings-backdrop" data-testid="fons-settings-backdrop" hidden></div>
+    <section id="fons-settings-panel" class="settings-panel" data-testid="fons-settings-panel" role="dialog" aria-label="灵感池设置" hidden>
+      <div class="settings-head">
+        <h2>设置</h2>
+        <button type="button" class="settings-close" data-testid="fons-settings-close" aria-label="关闭设置" title="关闭（Esc）">×</button>
+      </div>
+      <div class="settings-error" data-testid="fons-settings-error" hidden></div>
+      <div class="settings-section">
+        <div class="settings-title">显示</div>
+        <div class="settings-row">
+          <span class="settings-label">水位方向</span>
+          <div class="settings-seg" role="group" aria-label="水位方向">
+            <button type="button" class="seg-btn" data-testid="fons-flow-up" data-flow-choice="up">↑ 自下而上</button>
+            <button type="button" class="seg-btn" data-testid="fons-flow-right" data-flow-choice="right">→ 自左向右</button>
+          </div>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">投递参数</div>
+        <div class="settings-row">
+          <div class="settings-label-col">
+            <label class="settings-label" for="fons-debounce-sec-input">蓄水消抖时长</label>
+            <span class="settings-hint" data-testid="fons-debounce-hint">设为 0 即时投递，保存后立即生效</span>
+          </div>
+          <div class="debounce-input-wrap">
+            <input id="fons-debounce-sec-input" class="debounce-input" type="number" min="0" max="3600" step="1" value="45" data-testid="fons-debounce-sec" aria-label="蓄水消抖时长（秒）">
+            <span class="debounce-unit">秒</span>
+          </div>
+        </div>
+        <div class="preset-row" data-testid="fons-debounce-presets">
+          <button type="button" class="preset-chip" data-testid="fons-debounce-preset-0" data-debounce-preset="0">0s</button>
+          <button type="button" class="preset-chip" data-testid="fons-debounce-preset-15" data-debounce-preset="15">15s</button>
+          <button type="button" class="preset-chip" data-testid="fons-debounce-preset-45" data-debounce-preset="45">45s</button>
+          <button type="button" class="preset-chip" data-testid="fons-debounce-preset-90" data-debounce-preset="90">90s</button>
+        </div>
+        <div class="settings-row">
+          <div class="settings-label-col">
+            <label class="settings-label" for="fons-stop-wait-input">收尾兜底等待蓄水满</label>
+            <span class="settings-hint" data-testid="fons-stop-wait-hint">关闭时本轮结束立刻兜底未编辑草稿</span>
+          </div>
+          <input id="fons-stop-wait-input" class="fons-switch" type="checkbox" data-testid="fons-stop-wait" aria-label="收尾兜底等待蓄水满">
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-title">工作区挂载</div>
+        <div class="settings-row">
+          <div class="settings-label-col">
+            <label class="settings-label" for="fons-auto-attach-input">所有工作区自动挂载</label>
+            <span class="settings-hint">新开任意会话自动登记，仅入池时落盘到 .agents/fons/</span>
+          </div>
+          <input id="fons-auto-attach-input" class="fons-switch" type="checkbox" checked data-testid="fons-auto-attach" aria-label="所有工作区自动挂载">
+        </div>
+        <div class="ws-card" data-testid="fons-current-workspace">
+          <div class="ws-card-head">
+            <span class="ws-name" data-testid="fons-current-ws-name">当前会话</span>
+            <span class="ws-badge" data-testid="fons-current-ws-status">读取中</span>
+          </div>
+          <div class="ws-path" data-testid="fons-current-ws-path" hidden></div>
+          <div class="ws-actions">
+            <button type="button" class="ws-btn" data-testid="fons-current-ws-toggle" hidden>停用此工作区</button>
+            <button type="button" class="ws-btn ws-btn-primary" data-testid="fons-register-session" hidden>立即登记当前会话</button>
+          </div>
+        </div>
+        <div data-testid="fons-workspace-rules" hidden>
+          <div class="settings-hint">已单独配置的工作区</div>
+          <div class="ws-rule-list" data-testid="fons-workspace-list"></div>
+        </div>
+      </div>
+    </section>
     <div class="notice" role="status" aria-live="polite" hidden></div>
     <div class="list" role="list">
       <div class="empty-art" aria-hidden="true">
@@ -801,7 +1200,33 @@
         attach: $('[data-testid="fons-attach"]'), fileInput: $('[data-testid="fons-file-input"]'),
         quickSubmit: $('[data-testid="fons-quick-submit"]'), dropBanner: $('[data-testid="fons-drop-banner"]'),
         lightbox: $('[data-testid="fons-lightbox"]'),
-        flowMode: $('[data-testid="fons-flow-mode"]'), archive: $('[data-testid="fons-archive"]'),
+        settingsToggle: $('[data-testid="fons-settings-toggle"]'),
+        settingsBackdrop: $('[data-testid="fons-settings-backdrop"]'),
+        settingsPanel: $('[data-testid="fons-settings-panel"]'),
+        settingsClose: $('[data-testid="fons-settings-close"]'),
+        settingsError: $('[data-testid="fons-settings-error"]'),
+        flowUp: $('[data-testid="fons-flow-up"]'),
+        flowRight: $('[data-testid="fons-flow-right"]'),
+        debounceInput: $('[data-testid="fons-debounce-sec"]'),
+        debounceHint: $('[data-testid="fons-debounce-hint"]'),
+        debouncePresets: [
+          $('[data-testid="fons-debounce-preset-0"]'),
+          $('[data-testid="fons-debounce-preset-15"]'),
+          $('[data-testid="fons-debounce-preset-45"]'),
+          $('[data-testid="fons-debounce-preset-90"]'),
+        ].filter(Boolean),
+        stopWait: $('[data-testid="fons-stop-wait"]'),
+        stopWaitHint: $('[data-testid="fons-stop-wait-hint"]'),
+        autoAttach: $('[data-testid="fons-auto-attach"]'),
+        currentWorkspace: $('[data-testid="fons-current-workspace"]'),
+        currentWsName: $('[data-testid="fons-current-ws-name"]'),
+        currentWsStatus: $('[data-testid="fons-current-ws-status"]'),
+        currentWsPath: $('[data-testid="fons-current-ws-path"]'),
+        currentWsToggle: $('[data-testid="fons-current-ws-toggle"]'),
+        registerSession: $('[data-testid="fons-register-session"]'),
+        workspaceRules: $('[data-testid="fons-workspace-rules"]'),
+        workspaceList: $('[data-testid="fons-workspace-list"]'),
+        archive: $('[data-testid="fons-archive"]'),
         notice: $('.notice'), count: $('.pool-count'),
       };
       const state = {
@@ -815,6 +1240,7 @@
         draftAttachments: [], draftSeq: 0, draftPrepTail: Promise.resolve(), draftPrepPending: 0,
         submitAwaitingPrep: false, thumbUrls: new Map(), thumbInflight: new Map(),
         revocableUrls: new Set(), dragDepth: 0, dropRow: null,
+        settingsOpen: false, settingsData: null, settingsBusy: false, settingsSeq: 0,
       };
       let noticeTimer;
       const conversationId = () => window.sidecar?.conversationId || '';
@@ -831,25 +1257,231 @@
         }
       }
 
+      function syncFlowButtons() {
+        const upward = state.flowMode === 'up';
+        if (elements.flowUp) {
+          elements.flowUp.dataset.active = upward ? 'true' : 'false';
+          elements.flowUp.setAttribute('aria-pressed', upward ? 'true' : 'false');
+        }
+        if (elements.flowRight) {
+          elements.flowRight.dataset.active = upward ? 'false' : 'true';
+          elements.flowRight.setAttribute('aria-pressed', upward ? 'false' : 'true');
+        }
+      }
+
       function applyFlowMode(mode) {
         state.flowMode = mode === 'right' ? 'right' : 'up';
         if (elements.pool) {
           elements.pool.dataset.switching = 'true';
           elements.pool.dataset.flow = state.flowMode;
         }
-        if (elements.flowMode) {
-          const upward = state.flowMode === 'up';
-          elements.flowMode.textContent = upward ? '↑ 水位' : '→ 水位';
-          const tip = upward ? '蓄水方向：自下而上（点击切换为自左向右）' : '蓄水方向：自左向右（点击切换为自下而上）';
-          elements.flowMode.setAttribute('title', tip);
-          elements.flowMode.setAttribute('aria-label', tip);
-        }
+        syncFlowButtons();
         try { window.localStorage?.setItem(FLOW_STORAGE_KEY, state.flowMode); } catch {}
         updateWaterLevels();
         if (elements.pool) {
           void elements.pool.offsetWidth;
           delete elements.pool.dataset.switching;
         }
+      }
+
+      function showSettingsError(message) {
+        if (!elements.settingsError) return;
+        elements.settingsError.textContent = message || '';
+        elements.settingsError.hidden = !message;
+      }
+
+      function setSettingsControlsDisabled(disabled) {
+        for (const el of [
+          elements.debounceInput, elements.stopWait, elements.autoAttach,
+          elements.currentWsToggle, elements.registerSession, ...elements.debouncePresets,
+        ]) {
+          if (el) el.disabled = disabled;
+        }
+      }
+
+      function workspaceDisplayName(dirPath) {
+        const parts = String(dirPath || '').replace(/[\\/]+$/, '').split(/[\\/]/);
+        return parts[parts.length - 1] || String(dirPath || '');
+      }
+
+      function renderDebouncePresets(seconds) {
+        for (const chip of elements.debouncePresets) {
+          const preset = Number(chip.dataset?.debouncePreset);
+          chip.dataset.active = preset === seconds ? 'true' : 'false';
+        }
+      }
+
+      function workspaceStatusLabel(ws) {
+        if (!ws.enabled) return '已停用';
+        return ws.localPlugin ? '已启用（本地挂载）' : '已启用';
+      }
+
+      function renderWorkspaceCard(ws) {
+        elements.currentWsName.textContent = ws.name || workspaceDisplayName(ws.path);
+        elements.currentWsPath.textContent = ws.path;
+        elements.currentWsPath.setAttribute('title', ws.path);
+        elements.currentWsPath.hidden = false;
+        elements.currentWsStatus.textContent = workspaceStatusLabel(ws);
+        elements.currentWsStatus.dataset.state = ws.enabled ? 'enabled' : 'disabled';
+        elements.currentWsToggle.textContent = ws.enabled ? '停用此工作区' : '挂载此工作区';
+        elements.currentWsToggle.hidden = false;
+      }
+
+      function renderNoWorkspaceCard(data) {
+        elements.currentWsName.textContent = state.workspace === 'empty' ? '无工作区会话' : '当前会话';
+        elements.currentWsPath.hidden = true;
+        elements.currentWsStatus.textContent = data?.sessionRegistered ? '已登记' : '自动启用';
+        elements.currentWsStatus.dataset.state = 'enabled';
+        elements.currentWsToggle.hidden = true;
+      }
+
+      function renderCurrentWorkspaceCard(data) {
+        if (!elements.currentWorkspace) return;
+        if (data?.currentWorkspace) renderWorkspaceCard(data.currentWorkspace);
+        else renderNoWorkspaceCard(data);
+        if (elements.registerSession) elements.registerSession.hidden = !data?.canRegisterSession;
+      }
+
+      function makeWorkspaceRuleRow(dirPath, tag) {
+        const row = document.createElement('div');
+        row.className = 'ws-rule-row';
+        const name = document.createElement('span');
+        name.className = 'ws-rule-name';
+        name.textContent = workspaceDisplayName(dirPath);
+        name.setAttribute('title', dirPath);
+        const badge = document.createElement('span');
+        badge.className = 'ws-rule-tag';
+        badge.textContent = tag;
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'ws-rule-remove';
+        remove.textContent = '移除';
+        remove.disabled = state.settingsBusy;
+        remove.setAttribute('title', '恢复跟随默认规则');
+        remove.addEventListener('click', () => {
+          void sendSettings({ workspaceAction: { path: dirPath, mode: 'reset' } });
+        });
+        row.append(name, badge, remove);
+        return row;
+      }
+
+      function renderWorkspaceRules(config) {
+        if (!elements.workspaceRules || !elements.workspaceList) return;
+        const enabled = config?.enabledWorkspaces || [];
+        const disabled = config?.disabledWorkspaces || [];
+        const rows = [
+          ...enabled.map((dir) => makeWorkspaceRuleRow(dir, '已挂载')),
+          ...disabled.map((dir) => makeWorkspaceRuleRow(dir, '已停用')),
+        ];
+        elements.workspaceList.replaceChildren(...rows);
+        elements.workspaceRules.hidden = rows.length === 0;
+      }
+
+      function renderSettings() {
+        syncFlowButtons();
+        const data = state.settingsData;
+        if (!data) {
+          setSettingsControlsDisabled(true);
+          return;
+        }
+        const { config, envOverrides } = data;
+        setSettingsControlsDisabled(state.settingsBusy);
+        if (elements.debounceInput) elements.debounceInput.value = String(config.debounceSec);
+        renderDebouncePresets(config.debounceSec);
+        if (elements.debounceHint) {
+          elements.debounceHint.textContent = envOverrides?.debounceSec
+            ? '当前受环境变量 FONS_DEBOUNCE_SEC 覆盖'
+            : '设为 0 即时投递，保存后立即生效';
+        }
+        if (elements.stopWait) elements.stopWait.checked = Boolean(config.stopWaitDebounce);
+        if (elements.stopWaitHint) {
+          elements.stopWaitHint.textContent = envOverrides?.stopWaitDebounce
+            ? '当前受环境变量 FONS_STOP_WAIT_DEBOUNCE 覆盖'
+            : '关闭时本轮结束立刻兜底未编辑草稿';
+        }
+        if (elements.autoAttach) elements.autoAttach.checked = Boolean(config.autoAttachWorkspaces);
+        renderCurrentWorkspaceCard(data);
+        renderWorkspaceRules(config);
+      }
+
+      function settingsRequestPayload(update) {
+        const payload = {};
+        if (state.id) payload.conversationId = state.id;
+        if (workspaceReady()) payload.workspaceUris = state.workspaceUris;
+        if (update !== undefined) payload.update = update;
+        return payload;
+      }
+
+      async function sendSettings(update) {
+        syncSession();
+        const id = state.id;
+        const session = state.session;
+        const seq = ++state.settingsSeq;
+        state.settingsBusy = true;
+        showSettingsError('');
+        renderSettings();
+        try {
+          const data = await request('/api/pool/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(settingsRequestPayload(update)),
+          });
+          if (seq !== state.settingsSeq || id !== state.id || session !== state.session) return null;
+          state.settingsData = data;
+          state.settingsBusy = false;
+          renderSettings();
+          if (update !== undefined) {
+            state.etag = '';
+            state.refreshNeeded = true;
+            void poll();
+          }
+          return data;
+        } catch (error) {
+          if (seq !== state.settingsSeq || id !== state.id || session !== state.session) return null;
+          state.settingsBusy = false;
+          showSettingsError(error.message || '读取设置失败');
+          renderSettings();
+          return null;
+        }
+      }
+
+      function openSettings() {
+        if (!elements.settingsPanel) return;
+        syncSession();
+        state.settingsOpen = true;
+        elements.settingsPanel.hidden = false;
+        if (elements.settingsBackdrop) elements.settingsBackdrop.hidden = false;
+        elements.settingsToggle?.setAttribute('aria-expanded', 'true');
+        showSettingsError('');
+        renderSettings();
+        void sendSettings(undefined);
+      }
+
+      function closeSettings() {
+        if (!state.settingsOpen && elements.settingsPanel?.hidden !== false) return;
+        state.settingsOpen = false;
+        state.settingsSeq += 1;
+        state.settingsBusy = false;
+        if (elements.settingsPanel) elements.settingsPanel.hidden = true;
+        if (elements.settingsBackdrop) elements.settingsBackdrop.hidden = true;
+        elements.settingsToggle?.setAttribute('aria-expanded', 'false');
+        showSettingsError('');
+      }
+
+      function commitDebounceInput() {
+        if (!elements.debounceInput) return;
+        const raw = String(elements.debounceInput.value ?? '').trim();
+        const parsed = Number(raw);
+        if (!raw || !Number.isInteger(parsed) || parsed < 0 || parsed > 3600) {
+          if (state.settingsData?.config) elements.debounceInput.value = String(state.settingsData.config.debounceSec);
+          showSettingsError('蓄水时长需为 0 到 3600 之间的整数秒');
+          return;
+        }
+        if (state.settingsData?.config?.debounceSec === parsed) {
+          showSettingsError('');
+          return;
+        }
+        void sendSettings({ debounceSec: parsed });
       }
 
       function showNotice(message) {
@@ -963,6 +1595,10 @@
         state.registered = false;
         clearDragVisuals();
         closeLightbox();
+        state.settingsData = null;
+        elements.workspaceList?.replaceChildren();
+        if (elements.workspaceRules) elements.workspaceRules.hidden = true;
+        closeSettings();
         clearAttachmentCaches();
         elements.rows.replaceChildren();
         elements.quick.value = '';
@@ -1095,7 +1731,7 @@
       }
 
       function updateWaterLevels() {
-        const total = Math.max(1000, state.debounceMs || DEFAULT_DEBOUNCE_MS);
+        const total = Math.max(1000, typeof state.debounceMs === 'number' ? state.debounceMs : DEFAULT_DEBOUNCE_MS);
         let phase = 'idle';
         for (const node of elements.rows.children) {
           const rowState = applyRowWater(node, total);
@@ -1966,14 +2602,16 @@
       }
 
       function applySnapshot(data) {
-        if (!data.registered || data.scopeMismatch) {
+        if (!data.registered || data.scopeMismatch || data.workspaceDisabled) {
           clearPoolRows();
           if (data.scopeMismatch) {
             showEmpty('当前会话与工作区状态不匹配，请切换到目标会话或重新打开灵感池。');
+          } else if (data.workspaceDisabled) {
+            showEmpty('当前工作区已停用 Fons，可在右上角「设置」中开启挂载。');
           } else if (state.workspace === 'empty') {
-            showEmpty('当前无工作区会话尚未登记，请确认全局灵感池插件（fons-pool）已启用；旧会话请新开会话。');
+            showEmpty('当前无工作区会话尚未登记，可在右上角「设置」中立即登记，或新开会话自动启用。');
           } else {
-            showEmpty('当前会话尚未登记，请确认项目已挂载 Fons；旧会话请新开会话或参照 README 登记。');
+            showEmpty('当前会话尚未登记，可在右上角「设置」中立即登记，或新开会话自动启用。');
           }
           return;
         }
@@ -1982,7 +2620,7 @@
         updateAvailability();
         if (data.items.length > 0) elements.empty.hidden = true;
         state.etag = data.etag;
-        state.debounceMs = data.debounceMs || DEFAULT_DEBOUNCE_MS;
+        state.debounceMs = typeof data.debounceMs === 'number' ? data.debounceMs : DEFAULT_DEBOUNCE_MS;
         updateCount(data.items.filter((item) => item.status !== 'done').length);
         elements.archive.disabled = !data.canArchive;
         reconcile(data.items);
@@ -2210,14 +2848,75 @@
         });
       }
       document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape' && elements.lightbox && !elements.lightbox.hidden) {
+        if (event.key !== 'Escape') return;
+        if (elements.lightbox && !elements.lightbox.hidden) {
           event.preventDefault?.();
           closeLightbox();
+        } else if (state.settingsOpen) {
+          event.preventDefault?.();
+          closeSettings();
         }
       });
-      if (elements.flowMode) {
-        elements.flowMode.addEventListener('click', () => {
-          applyFlowMode(state.flowMode === 'up' ? 'right' : 'up');
+      if (elements.settingsToggle) {
+        elements.settingsToggle.addEventListener('click', () => {
+          if (state.settingsOpen) closeSettings();
+          else openSettings();
+        });
+      }
+      if (elements.settingsClose) {
+        elements.settingsClose.addEventListener('click', () => closeSettings());
+      }
+      if (elements.settingsBackdrop) {
+        elements.settingsBackdrop.addEventListener('click', () => closeSettings());
+      }
+      if (elements.flowUp) {
+        elements.flowUp.addEventListener('click', () => applyFlowMode('up'));
+      }
+      if (elements.flowRight) {
+        elements.flowRight.addEventListener('click', () => applyFlowMode('right'));
+      }
+      if (elements.debounceInput) {
+        elements.debounceInput.addEventListener('change', () => commitDebounceInput());
+        elements.debounceInput.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault?.();
+          commitDebounceInput();
+        });
+      }
+      for (const chip of elements.debouncePresets) {
+        chip.addEventListener('click', () => {
+          const seconds = Number(chip.dataset?.debouncePreset);
+          if (Number.isInteger(seconds)) void sendSettings({ debounceSec: seconds });
+        });
+      }
+      if (elements.stopWait) {
+        elements.stopWait.addEventListener('change', () => {
+          void sendSettings({ stopWaitDebounce: Boolean(elements.stopWait.checked) });
+        });
+      }
+      if (elements.autoAttach) {
+        elements.autoAttach.addEventListener('change', () => {
+          void sendSettings({ autoAttachWorkspaces: Boolean(elements.autoAttach.checked) });
+        });
+      }
+      if (elements.currentWsToggle) {
+        elements.currentWsToggle.addEventListener('click', () => {
+          syncSession();
+          const ws = state.settingsData?.currentWorkspace;
+          if (!ws?.path) return;
+          const mode = ws.enabled ? 'disable' : 'enable';
+          const update = { workspaceAction: { path: ws.path, mode } };
+          if (mode === 'enable' && !state.settingsData?.sessionRegistered && state.id && workspaceReady()) {
+            update.registerCurrentSession = true;
+          }
+          void sendSettings(update);
+        });
+      }
+      if (elements.registerSession) {
+        elements.registerSession.addEventListener('click', () => {
+          void sendSettings({ registerCurrentSession: true }).then((data) => {
+            if (data?.sessionRegistered) closeSettings();
+          });
         });
       }
       elements.archive.addEventListener('click', () => {

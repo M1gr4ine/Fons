@@ -357,7 +357,7 @@ test('SDK rejects missing and invalid tokens for every data route', { skip: !fs.
     const server = await app.run();
     try {
       const base = 'http://127.0.0.1:' + server.address().port;
-      for (const route of ['/api/pool', ...['add','complete','update','remove','reopen','archive','hold','release'].map(x => '/api/pool/' + x)]) {
+      for (const route of ['/api/pool', '/api/pool/settings', ...['add','complete','update','remove','reopen','archive','hold','release'].map(x => '/api/pool/' + x)]) {
         for (const token of [null, 'incorrect']) {
           const headers = { 'Content-Type': 'application/json' };
           if (token) headers['X-Sidecar-Token'] = token;
@@ -393,4 +393,88 @@ test('SDK rejects missing and invalid tokens for every data route', { skip: !fs.
     rootDir, appData, SESSION, OTHER,
   ], { env: { ...syntheticEnv, ANTIGRAVITY_SIDECAR_UI_TOKEN: 'synthetic-token' }, encoding: 'utf8', timeout: 10000 });
   assert.equal(child.status, 0, child.stderr || child.error?.message);
+});
+
+test('settings route updates debounce, stop-wait, workspace mount rules, and supports explicit session registration', async (t) => {
+  const ctx = await mounted(t);
+  const savedEnv = { debounce: process.env.FONS_DEBOUNCE_SEC, stopWait: process.env.FONS_STOP_WAIT_DEBOUNCE };
+  delete process.env.FONS_DEBOUNCE_SEC;
+  delete process.env.FONS_STOP_WAIT_DEBOUNCE;
+  t.after(() => {
+    if (savedEnv.debounce === undefined) delete process.env.FONS_DEBOUNCE_SEC;
+    else process.env.FONS_DEBOUNCE_SEC = savedEnv.debounce;
+    if (savedEnv.stopWait === undefined) delete process.env.FONS_STOP_WAIT_DEBOUNCE;
+    else process.env.FONS_STOP_WAIT_DEBOUNCE = savedEnv.stopWait;
+  });
+
+  const wsUri = pathToFileURL(ctx.rootDir).href;
+  const initial = await post(ctx, 'settings', { workspaceUris: [wsUri] });
+  assert.equal(initial.config.debounceSec, 45);
+  assert.equal(initial.config.stopWaitDebounce, false);
+  assert.equal(initial.config.autoAttachWorkspaces, true);
+  assert.equal(initial.currentWorkspace.enabled, true);
+  assert.equal(initial.sessionRegistered, false);
+  assert.equal(initial.canRegisterSession, true);
+
+  // Explicit registration via settings registers an existing unregistered session immediately
+  const registered = await post(ctx, 'settings', { workspaceUris: [wsUri], update: { registerCurrentSession: true } });
+  assert.equal(registered.sessionRegistered, true);
+  assert.equal(registered.canRegisterSession, false);
+  const firstSnap = await read(ctx, { workspaceUris: [wsUri] });
+  assert.equal(firstSnap.registered, true);
+  assert.equal(firstSnap.debounceMs, 45000);
+
+  // Updating debounceSec invalidates etag and reflects immediately in pool snapshot
+  const updated = await post(ctx, 'settings', { workspaceUris: [wsUri], update: { debounceSec: 15, stopWaitDebounce: true } });
+  assert.equal(updated.config.debounceSec, 15);
+  assert.equal(updated.config.stopWaitDebounce, true);
+  const afterDebounce = await read(ctx, { workspaceUris: [wsUri], etag: firstSnap.etag });
+  assert.equal(afterDebounce.unchanged, undefined);
+  assert.equal(afterDebounce.debounceMs, 15000);
+
+  // Disabling the current workspace blocks pool reads & mutations cleanly
+  const disabled = await post(ctx, 'settings', {
+    workspaceUris: [wsUri],
+    update: { workspaceAction: { path: ctx.rootDir, mode: 'disable' } },
+  });
+  assert.equal(disabled.currentWorkspace.enabled, false);
+  assert.deepEqual(await read(ctx, { workspaceUris: [wsUri] }), { registered: true, workspaceDisabled: true, scope: 'workspace' });
+  assert.equal((await post(ctx, 'add', { workspaceUris: [wsUri], texts: ['blocked'] })).status, 409);
+
+  // Re-enabling restores access immediately
+  const reenabled = await post(ctx, 'settings', {
+    workspaceUris: [wsUri],
+    update: { workspaceAction: { path: ctx.rootDir, mode: 'enable' } },
+  });
+  assert.equal(reenabled.currentWorkspace.enabled, true);
+  assert.equal((await read(ctx, { workspaceUris: [wsUri] })).registered, true);
+
+  // Invalid settings payloads return 400 (including NUL bytes in workspaceAction.path) without corrupting saved config
+  assert.equal((await post(ctx, 'settings', { update: { debounceSec: -5 } })).status, 400);
+  assert.equal((await post(ctx, 'settings', { update: { stopWaitDebounce: 'bad' } })).status, 400);
+  assert.equal((await post(ctx, 'settings', { update: 'bad' })).status, 400);
+  assert.equal((await post(ctx, 'settings', { update: { workspaceAction: { path: path.join(ctx.rootDir, 'bad\0path'), mode: 'disable' } } })).status, 400);
+  assert.equal((await post(ctx, 'settings', { workspaceUris: [wsUri] })).config.debounceSec, 15);
+
+  // Unregistered session in a disabled workspace reports workspaceDisabled and refuses registration without partial config write
+  const otherWs = path.join(ctx.rootDir, 'other-ws');
+  fs.mkdirSync(otherWs, { recursive: true });
+  const otherUri = pathToFileURL(otherWs).href;
+  await post(ctx, 'settings', { conversationId: OTHER, workspaceUris: [otherUri], update: { workspaceAction: { path: otherWs, mode: 'disable' } } });
+  assert.deepEqual(await read(ctx, { conversationId: OTHER, workspaceUris: [otherUri] }), { registered: false, workspaceDisabled: true });
+  assert.equal((await post(ctx, 'settings', { conversationId: OTHER, workspaceUris: [otherUri], update: { registerCurrentSession: true } })).status, 409);
+
+  // Failed registerCurrentSession precondition (missing sessionId) must not mutate config.json
+  const failedPartial = await route(ctx, 'POST', '/api/pool/settings', {
+    workspaceUris: [otherUri],
+    update: { workspaceAction: { path: otherWs, mode: 'enable' }, registerCurrentSession: true },
+  });
+  assert.equal(failedPartial.status, 400);
+  assert.equal((await post(ctx, 'settings', { conversationId: OTHER, workspaceUris: [otherUri] })).currentWorkspace.enabled, false);
+
+  // Mismatched existing session rejects registerCurrentSession with 409; no-workspace session registers cleanly
+  assert.equal((await post(ctx, 'settings', { conversationId: SESSION, workspaceUris: [otherUri], update: { registerCurrentSession: true } })).status, 409);
+  const noWsReg = await post(ctx, 'settings', { conversationId: OTHER, workspaceUris: [], update: { registerCurrentSession: true } });
+  assert.equal(noWsReg.sessionRegistered, true);
+  assert.equal((await read(ctx, { conversationId: OTHER, workspaceUris: [] })).scope, 'no-workspace');
 });

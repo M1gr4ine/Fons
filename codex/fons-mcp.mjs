@@ -4,7 +4,9 @@ import { stdin, stdout, stderr } from 'node:process';
 import { pathToFileURL } from 'node:url';
 import { codexAppData } from '../adapters/codex.mjs';
 import { isValidSessionId, lookupConversation } from '../scripts/fons-store.mjs';
-import { mountPoolRoutes } from '../sidecars/fons-pool/main.mjs';
+import {
+  POOL_BODY_LIMIT, POOL_TOKEN_PATTERN, POOL_UPLOAD_LIMIT, POOL_UPLOAD_ROUTES, createBoundPoolRoutes,
+} from '../sidecars/fons-pool/main.mjs';
 
 const UI_URI = 'ui://fons/pool.html';
 const UI_MIME = 'text/html;profile=mcp-app';
@@ -19,12 +21,8 @@ const OPEN_TOOL = 'open_fons_pool';
 const REQUEST_TOOL = 'fons_pool_request';
 const SERVER_INFO = { name: 'fons', version: '1.0.0' };
 const PROTOCOL_VERSIONS = new Set(['2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25']);
-const BODY_LIMIT = 256 * 1024;
-const UPLOAD_LIMIT = 112 * 1024 * 1024;
-const MESSAGE_LIMIT = UPLOAD_LIMIT + BODY_LIMIT;
-const UPLOAD_ROUTES = new Set(['/api/pool/add', '/api/pool/update']);
+const MESSAGE_LIMIT = POOL_UPLOAD_LIMIT + POOL_BODY_LIMIT;
 const MAX_PANELS = 128;
-const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 
 const resource = {
   uri: UI_URI,
@@ -96,18 +94,6 @@ function readRouteResult(result) {
   return routeResult(200, result ?? {});
 }
 
-function createPoolRoutes(boundSession) {
-  const routes = new Map();
-  mountPoolRoutes({
-    page() {},
-    api(path, handle, method) {
-      if (method !== 'POST') throw new Error('Fons MCP 只支持 POST 面板操作。');
-      routes.set(path, handle);
-    },
-  }, boundSession.appData, { boundSession });
-  return routes;
-}
-
 function openPanel({ appData, panels }, args, threadId) {
   if (!isObject(args) || Object.keys(args).length) return openError('打开面板无需提供任何参数。');
   if (!threadId) return openError('Codex 未提供当前会话身份，请在 Codex 桌面会话中打开 Fons。');
@@ -116,7 +102,7 @@ function openPanel({ appData, panels }, args, threadId) {
     return openError('当前 Codex 会话尚未由 Fons Hook 登记。请确认 Fons Hook 已启用并受信任，再打开面板。');
   }
 
-  const routes = createPoolRoutes({ ...entry, appData, sessionId: threadId });
+  const routes = createBoundPoolRoutes({ ...entry, appData, sessionId: threadId });
   const token = randomBytes(32).toString('hex');
   const workspaceUris = entry.rootDir ? [pathToFileURL(entry.rootDir).href] : [];
   if (panels.size >= MAX_PANELS) panels.delete(panels.keys().next().value);
@@ -129,7 +115,7 @@ function openPanel({ appData, panels }, args, threadId) {
 
 function validRouteArgs(args) {
   return isObject(args) && Object.keys(args).length === 3 &&
-    typeof args.token === 'string' && TOKEN_PATTERN.test(args.token) &&
+    typeof args.token === 'string' && POOL_TOKEN_PATTERN.test(args.token) &&
     typeof args.path === 'string' && isObject(args.data);
 }
 
@@ -142,7 +128,7 @@ function runPoolRoute(panels, args, threadId) {
   }
   const handle = panel.routes.get(path);
   if (!handle) return routeError(404, '面板接口不存在。');
-  const limit = UPLOAD_ROUTES.has(path) ? UPLOAD_LIMIT : BODY_LIMIT;
+  const limit = POOL_UPLOAD_ROUTES.has(path) ? POOL_UPLOAD_LIMIT : POOL_BODY_LIMIT;
   if (Buffer.byteLength(JSON.stringify(data)) > limit) return routeError(413, '请求体超过允许的大小。');
   panels.delete(token);
   panels.set(token, panel);
