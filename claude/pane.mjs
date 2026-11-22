@@ -1,5 +1,6 @@
 const PANE_ID = 'fons-pool';
 const PANE_TITLE = 'Fons · 灵感池';
+const DEFAULT_DEBOUNCE_SEC = 45;
 const DEBOUNCE_PRESETS = [0, 15, 30, 45, 60, 90];
 const TICK_MS = 1000;
 const POLL_MS = 2500;
@@ -33,6 +34,14 @@ function createInitialState(options) {
   };
 }
 
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function joinPath(base, ...parts) {
   const raw = String(base || '').replace(/\\/g, '/');
   let out = raw.replace(/\/+$/, '');
@@ -48,8 +57,23 @@ function joinPath(base, ...parts) {
 }
 
 function parseJson(text) {
-  try { return JSON.parse(String(text || '')); }
+  if (typeof text !== 'string' || !text.trim()) return null;
+  try { return JSON.parse(text); }
   catch { return null; }
+}
+
+function splitDraftLines(raw) {
+  return String(raw ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+async function readOptionalJson($, filePath) {
+  return parseJson(await $.fs.read(filePath).catch(() => ''));
+}
+
+async function pickExistingBridge($, state, candidate) {
+  if (!candidate || !(await $.fs.exists(candidate).catch(() => false))) return '';
+  state.bridgePath = candidate;
+  return candidate;
 }
 
 function stopHoldRenew(state) {
@@ -58,42 +82,37 @@ function stopHoldRenew(state) {
 }
 
 async function resolveBridgePath($, state) {
-  if (state.bridgePath && (await $.fs.exists(state.bridgePath).catch(() => false))) {
-    return state.bridgePath;
-  }
-  const candidates = [];
+  if (await pickExistingBridge($, state, state.bridgePath)) return state.bridgePath;
+
   const pluginRoot = ((await $.env.get('CLAUDE_PLUGIN_ROOT')) || '').trim();
-  if (pluginRoot) candidates.push(joinPath(pluginRoot, 'claude/pane-bridge.mjs'));
+  if (pluginRoot) {
+    const found = await pickExistingBridge($, state, joinPath(pluginRoot, 'claude/pane-bridge.mjs'));
+    if (found) return found;
+  }
 
   const configDir = ((await $.env.get('CLAUDE_CONFIG_DIR')) || '').trim();
   const home = ((await $.env.get('USERPROFILE')) || (await $.env.get('HOME')) || '').trim();
   const claudeHome = configDir || (home ? joinPath(home, '.claude') : '');
   if (claudeHome) {
     const marketDir = joinPath(claudeHome, 'fons/plugin-marketplace');
-    const marketFile = joinPath(marketDir, '.claude-plugin/marketplace.json');
-    if (await $.fs.exists(marketFile).catch(() => false)) {
-      const catalog = parseJson(await $.fs.read(marketFile).catch(() => ''));
-      const plugins = catalog && Array.isArray(catalog.plugins) ? catalog.plugins : [];
-      const entry = plugins.find((p) => p && p.name === 'fons');
-      const source = typeof entry?.source === 'string' ? entry.source.trim() : '';
-      if (source) candidates.push(joinPath(marketDir, source, 'claude/pane-bridge.mjs'));
+    const catalog = await readOptionalJson($, joinPath(marketDir, '.claude-plugin/marketplace.json'));
+    const entry = Array.isArray(catalog?.plugins) ? catalog.plugins.find((p) => p?.name === 'fons') : null;
+    const source = typeof entry?.source === 'string' ? entry.source.trim() : '';
+    if (source) {
+      const found = await pickExistingBridge($, state, joinPath(marketDir, source, 'claude/pane-bridge.mjs'));
+      if (found) return found;
     }
-    const installedFile = joinPath(claudeHome, 'plugins/installed_plugins.json');
-    if (await $.fs.exists(installedFile).catch(() => false)) {
-      const installed = parseJson(await $.fs.read(installedFile).catch(() => ''));
-      const records = installed?.plugins?.['fons@fons-local'];
-      const rawPath = Array.isArray(records) ? records[0]?.installPath : '';
-      const installPath = typeof rawPath === 'string' ? rawPath.trim() : '';
-      if (installPath) candidates.push(joinPath(installPath, 'claude/pane-bridge.mjs'));
+
+    const installed = await readOptionalJson($, joinPath(claudeHome, 'plugins/installed_plugins.json'));
+    const records = installed?.plugins?.['fons@fons-local'];
+    const rawPath = Array.isArray(records) ? records[0]?.installPath : '';
+    const installPath = typeof rawPath === 'string' ? rawPath.trim() : '';
+    if (installPath) {
+      const found = await pickExistingBridge($, state, joinPath(installPath, 'claude/pane-bridge.mjs'));
+      if (found) return found;
     }
   }
 
-  for (const candidate of candidates) {
-    if (await $.fs.exists(candidate).catch(() => false)) {
-      state.bridgePath = candidate;
-      return candidate;
-    }
-  }
   state.bridgePath = '';
   return '';
 }
@@ -101,7 +120,7 @@ async function resolveBridgePath($, state) {
 async function syncSessionMeta($, state) {
   const nextId = await $.session.id().catch(() => '');
   const nextCwd = await $.session.cwd().catch(() => '');
-  const changed = Boolean(nextId) && Boolean(state.sessionId) && nextId !== state.sessionId;
+  const changed = Boolean(nextId && state.sessionId && nextId !== state.sessionId);
   if (nextId) state.sessionId = nextId;
   if (nextCwd) state.cwd = nextCwd;
   if (changed) {
@@ -115,32 +134,34 @@ async function syncSessionMeta($, state) {
     stopHoldRenew(state);
     $.ui.invalidate('ui.render');
   }
-  return changed;
 }
 
-async function invokeBridge($, state, { action, payload }) {
-  const bridgePath = await resolveBridgePath($, state);
-  if (!bridgePath) {
-    return { ok: false, error: '找不到 Fons 桥接脚本，请重新运行 fons claude init 并 /reload-plugins。' };
+async function invokeBridge($, state, { action, payload, sessionId = state.sessionId }) {
+  try {
+    const bridgePath = await resolveBridgePath($, state);
+    if (!bridgePath) {
+      return { ok: false, error: '找不到 Fons 桥接脚本，请重新运行 fons claude init 并 /reload-plugins。' };
+    }
+    const run = await $.process.run(['node', bridgePath, action], {
+      cwd: state.cwd || undefined,
+      env: { FONS_BRIDGE_INPUT: JSON.stringify({ ...payload, sessionId }) },
+      timeoutMs: BRIDGE_TIMEOUT_MS,
+    });
+    const parsed = parseJson(run?.stdout);
+    if (isPlainObject(parsed)) return parsed;
+    const stderr = String(run?.stderr ?? '').trim().split('\n')[0];
+    return { ok: false, error: stderr || ('Fons 桥接返回异常（exit ' + run?.exitCode + '）。') };
+  } catch (error) {
+    return { ok: false, error: errorMessage(error) };
   }
-  const run = await $.process.run(['node', bridgePath, action], {
-    cwd: state.cwd || undefined,
-    env: { FONS_BRIDGE_INPUT: JSON.stringify({ ...payload, sessionId: state.sessionId }) },
-    timeoutMs: BRIDGE_TIMEOUT_MS,
-  });
-  const parsed = parseJson(run.stdout.trim());
-  if (parsed && typeof parsed === 'object') return parsed;
-  const stderr = String(run.stderr || '').trim().split('\n')[0];
-  return { ok: false, error: stderr || ('Fons 桥接返回异常（exit ' + run.exitCode + '）。') };
 }
 
 async function applySnapshot($, state, snapshot) {
-  if (!snapshot || typeof snapshot !== 'object') return;
   state.snapshot = snapshot;
   state.snapshotAt = await $.clock.now();
   state.hadActiveCountdown = hasActiveCountdown(state, state.snapshotAt);
   if (state.editing) {
-    const stillBuffering = (snapshot.items || []).some(
+    const stillBuffering = (snapshot.items ?? []).some(
       (item) => item.id === state.editing.id && item.status === 'buffering',
     );
     if (!stillBuffering) {
@@ -181,10 +202,10 @@ async function refreshSnapshot($, state) {
     }
   } catch (error) {
     if (gen === state.snapshotGen) {
-      state.error = error instanceof Error ? error.message : String(error);
+      state.error = errorMessage(error);
     }
   } finally {
-    state.activeOps = Math.max(0, state.activeOps - 1);
+    state.activeOps -= 1;
     $.ui.invalidate('ui.render');
     flushQueuedRefresh($, state);
   }
@@ -192,6 +213,7 @@ async function refreshSnapshot($, state) {
 
 async function runPoolOp($, state, { op, data }) {
   state.activeOps += 1;
+  // Bump before awaiting so any in-flight refreshSnapshot discards its stale result; bump again after syncSessionMeta so this op claims the newest generation.
   state.snapshotGen += 1;
   try {
     await syncSessionMeta($, state);
@@ -211,11 +233,11 @@ async function runPoolOp($, state, { op, data }) {
     }
     return response;
   } catch (error) {
-    state.error = error instanceof Error ? error.message : String(error);
+    state.error = errorMessage(error);
     $.ui.toast(state.error);
     return { ok: false, error: state.error };
   } finally {
-    state.activeOps = Math.max(0, state.activeOps - 1);
+    state.activeOps -= 1;
     $.ui.invalidate('ui.render');
     flushQueuedRefresh($, state);
   }
@@ -224,6 +246,7 @@ async function runPoolOp($, state, { op, data }) {
 async function openPane($, state, { focus = true, manual = true, refresh = 'always' } = {}) {
   state.openedManually = manual;
   if (manual) state.userTouchedPane = true;
+  // Claude host rejects focus: false; omit focus unless true.
   const openOptions = focus
     ? { id: PANE_ID, title: PANE_TITLE, focus: true }
     : { id: PANE_ID, title: PANE_TITLE };
@@ -235,13 +258,21 @@ async function openPane($, state, { focus = true, manual = true, refresh = 'alwa
   }
 }
 
-async function closePane($, state) {
+function clearClosedPaneState($, state) {
   state.userTouchedPane = true;
-  await cancelEdit($, state);
   state.isOpen = false;
   state.showSettings = false;
-  await $.ui.close({ id: PANE_ID }).catch(() => undefined);
+  const releasing = cancelEdit($, state);
   $.ui.invalidate('ui.render');
+  return releasing;
+}
+
+async function closePane($, state) {
+  const releasing = clearClosedPaneState($, state);
+  await Promise.all([
+    releasing,
+    $.ui.close({ id: PANE_ID }).catch(() => undefined),
+  ]);
 }
 
 async function togglePane($, state) {
@@ -257,9 +288,11 @@ async function togglePane($, state) {
 
 async function openWebPanel($, state) {
   await syncSessionMeta($, state);
-  const existing = state.webPanel && state.webPanel.sessionId === state.sessionId ? state.webPanel : null;
+  const targetSessionId = state.sessionId;
+  const existing = state.webPanel?.sessionId === targetSessionId ? state.webPanel : null;
   const response = await invokeBridge($, state, {
     action: 'open-web',
+    sessionId: targetSessionId,
     payload: {
       scope: state.snapshot?.scope,
       existingPid: existing?.pid,
@@ -267,7 +300,9 @@ async function openWebPanel($, state) {
     },
   });
   if (response.ok) {
-    state.webPanel = { sessionId: state.sessionId, pid: response.pid, url: response.url };
+    if (state.sessionId === targetSessionId) {
+      state.webPanel = { sessionId: targetSessionId, pid: response.pid, url: response.url };
+    }
     $.ui.toast(response.reused ? '已唤起 Fons 网页版面板' : '已在浏览器打开 Fons 网页版面板');
   } else {
     $.ui.toast(response.error || '无法打开 Fons 网页版面板');
@@ -298,7 +333,7 @@ async function startEdit($, state, item) {
       stopHoldRenew(state);
       return;
     }
-    void invokeBridge($, state, { action: 'pool', payload: { op: 'hold', data: { id: item.id } } }).catch(() => undefined);
+    void invokeBridge($, state, { action: 'pool', payload: { op: 'hold', data: { id: item.id } } });
   });
   $.ui.invalidate('ui.render');
 }
@@ -314,7 +349,7 @@ async function cancelEdit($, state) {
 async function saveEdit($, state, rawValue) {
   const editing = state.editing;
   if (!editing) return;
-  const nextText = String(rawValue || '').trim();
+  const nextText = String(rawValue ?? '').trim();
   if (!nextText && !editing.keepAttachments.length) {
     $.ui.toast('灵感内容不能为空；如需删除请点击删除按钮。');
     return;
@@ -331,7 +366,7 @@ async function saveEdit($, state, rawValue) {
 }
 
 async function submitDraft($, state, rawValue) {
-  const lines = String(rawValue || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = splitDraftLines(rawValue);
   if (!lines.length) return;
   state.draftSeq += 1;
   $.ui.invalidate('ui.render');
@@ -354,6 +389,14 @@ function summarizeItems(items) {
     else if (item.status === 'done') done += 1;
   }
   return { buffering, delivered, done };
+}
+
+function formatCountsSummary(counts, { includeDone = false } = {}) {
+  const parts = [];
+  if (counts.buffering) parts.push('蓄水 ' + counts.buffering);
+  if (counts.delivered) parts.push('已投递 ' + counts.delivered);
+  if (includeDone && counts.done) parts.push('已完成 ' + counts.done);
+  return parts.join(' · ');
 }
 
 function liveRemainingMs(state, item, now) {
@@ -382,7 +425,7 @@ function progressBar(remainingMs, debounceMs) {
 function renderSettingsPanel($, state, ui, snapshot) {
   const { Box, Text, Button } = ui;
   const settings = snapshot?.settings;
-  const config = settings?.config || { debounceSec: 45, stopWaitDebounce: false };
+  const config = settings?.config || { debounceSec: DEFAULT_DEBOUNCE_SEC, stopWaitDebounce: false };
   const overrides = settings?.envOverrides || {};
   const workspace = settings?.currentWorkspace;
 
@@ -534,17 +577,9 @@ function renderItemRow($, ui, { state, item, debounceMs, now }) {
   });
 }
 
-function renderPaneBody($, state, ui, now) {
-  const { Box, Text, Button, Input } = ui;
-  const snapshot = state.snapshot;
-  const items = snapshot?.items || [];
-  const counts = summarizeItems(items);
-  const summaryParts = [];
-  if (counts.buffering) summaryParts.push('蓄水 ' + counts.buffering);
-  if (counts.delivered) summaryParts.push('已投递 ' + counts.delivered);
-  if (counts.done) summaryParts.push('已完成 ' + counts.done);
-  const summaryText = summaryParts.length ? summaryParts.join(' · ') : '空闲';
-
+function renderHeader($, state, ui, snapshot, items) {
+  const { Box, Text, Button } = ui;
+  const summaryText = formatCountsSummary(summarizeItems(items), { includeDone: true }) || '空闲';
   const headerButtons = [
     Button({ key: 'refresh', label: '↻', plain: true, onPress: () => refreshSnapshot($, state) }),
   ];
@@ -561,31 +596,111 @@ function renderPaneBody($, state, ui, now) {
     }),
     Button({ key: 'web', label: '网页版', plain: true, onPress: () => openWebPanel($, state) }),
   );
+  return Box({
+    key: 'header',
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 1,
+    children: [
+      Box({
+        flexDirection: 'row',
+        gap: 1,
+        children: [
+          Text({ bold: true, color: 'cyan', children: '💧 ' + PANE_TITLE }),
+          Text({ dimColor: true, children: summaryText }),
+        ],
+      }),
+      Box({ flexDirection: 'row', gap: 1, children: headerButtons }),
+    ],
+  });
+}
 
-  const sections = [
-    Box({
-      key: 'header',
-      flexDirection: 'row',
-      justifyContent: 'space-between',
+function renderComposerOrNotice($, state, ui, snapshot, canWrite) {
+  const { Box, Text, Button, Input } = ui;
+  const workspace = snapshot?.settings?.currentWorkspace;
+  if (snapshot?.workspaceDisabled && workspace?.path) {
+    return Box({
+      key: 'ws-disabled',
+      flexDirection: 'column',
+      marginBottom: 1,
+      children: [
+        Text({ color: 'yellow', children: '当前工作区已停用 Fons：' + workspace.name }),
+        Button({
+          key: 'enable-ws',
+          label: '启用当前工作区',
+          variant: 'primary',
+          onPress: () => updateSettings($, state, { workspaceAction: { path: workspace.path, mode: 'enable' } }),
+        }),
+      ],
+    });
+  }
+  if (snapshot && !snapshot.registered) {
+    return Box({
+      key: 'unregistered',
+      flexDirection: 'column',
+      marginBottom: 1,
+      children: [
+        Text({ dimColor: true, wrap: 'wrap', children: '当前会话尚未登记到 Fons（若是刚安装或启用插件，请新开会话或点击刷新）。' }),
+        Button({ key: 'refresh-unreg', label: '刷新状态', plain: true, onPress: () => refreshSnapshot($, state) }),
+      ],
+    });
+  }
+  if (!canWrite || !('Input' in ui)) return null;
+  if (state.editing) {
+    return Box({
+      key: 'edit-box',
+      flexDirection: 'column',
+      borderStyle: 'round',
+      borderColor: 'cyan',
+      paddingX: 1,
       marginBottom: 1,
       children: [
         Box({
           flexDirection: 'row',
-          gap: 1,
+          justifyContent: 'space-between',
           children: [
-            Text({ bold: true, color: 'cyan', children: '💧 ' + PANE_TITLE }),
-            Text({ dimColor: true, children: summaryText }),
+            Text({ color: 'cyan', children: '编辑中（已暂缓该条蓄水计时）' }),
+            Button({ key: 'cancel-edit', label: '取消', plain: true, onPress: () => cancelEdit($, state) }),
           ],
         }),
-        Box({ flexDirection: 'row', gap: 1, children: headerButtons }),
+        Input({
+          key: 'edit-input-' + state.editing.id,
+          label: '✎ ',
+          placeholder: '修改灵感内容，Enter 保存…',
+          submitLabel: '保存',
+          autoFocus: true,
+          value: state.editing.initialText,
+          onSubmit: (value) => saveEdit($, state, value),
+        }),
       ],
-    }),
-  ];
+    });
+  }
+  return Box({
+    key: 'draft-box',
+    marginBottom: 1,
+    children: [
+      Input({
+        key: 'draft-' + state.draftSeq,
+        label: '+ ',
+        placeholder: '记下补充灵感，Enter 入池…',
+        submitLabel: '入池',
+        value: '',
+        onSubmit: (value) => submitDraft($, state, value),
+      }),
+    ],
+  });
+}
 
+function renderPaneBody($, state, ui, now) {
+  const { Box, Text, Button } = ui;
+  const snapshot = state.snapshot;
+  const items = snapshot?.items || [];
+  const canWrite = Boolean(snapshot?.registered && !snapshot?.workspaceDisabled);
+
+  const sections = [renderHeader($, state, ui, snapshot, items)];
   if (state.showSettings) {
     sections.push(renderSettingsPanel($, state, ui, snapshot));
   }
-
   if (state.error) {
     sections.push(Box({
       key: 'err',
@@ -599,80 +714,8 @@ function renderPaneBody($, state, ui, now) {
     }));
   }
 
-  const workspace = snapshot?.settings?.currentWorkspace;
-  const canWrite = Boolean(snapshot?.registered && !snapshot?.workspaceDisabled);
-
-  if (snapshot && snapshot.workspaceDisabled && workspace?.path) {
-    sections.push(Box({
-      key: 'ws-disabled',
-      flexDirection: 'column',
-      marginBottom: 1,
-      children: [
-        Text({ color: 'yellow', children: '当前工作区已停用 Fons：' + workspace.name }),
-        Button({
-          key: 'enable-ws',
-          label: '启用当前工作区',
-          variant: 'primary',
-          onPress: () => updateSettings($, state, { workspaceAction: { path: workspace.path, mode: 'enable' } }),
-        }),
-      ],
-    }));
-  } else if (snapshot && !snapshot.registered) {
-    sections.push(Box({
-      key: 'unregistered',
-      flexDirection: 'column',
-      marginBottom: 1,
-      children: [
-        Text({ dimColor: true, wrap: 'wrap', children: '当前会话尚未登记到 Fons（若是刚安装或启用插件，请新开会话或点击刷新）。' }),
-        Button({ key: 'refresh-unreg', label: '刷新状态', plain: true, onPress: () => refreshSnapshot($, state) }),
-      ],
-    }));
-  } else if (canWrite && 'Input' in ui) {
-    if (state.editing) {
-      sections.push(Box({
-        key: 'edit-box',
-        flexDirection: 'column',
-        borderStyle: 'round',
-        borderColor: 'cyan',
-        paddingX: 1,
-        marginBottom: 1,
-        children: [
-          Box({
-            flexDirection: 'row',
-            justifyContent: 'space-between',
-            children: [
-              Text({ color: 'cyan', children: '编辑中（已暂缓该条蓄水计时）' }),
-              Button({ key: 'cancel-edit', label: '取消', plain: true, onPress: () => cancelEdit($, state) }),
-            ],
-          }),
-          Input({
-            key: 'edit-input-' + state.editing.id,
-            label: '✎ ',
-            placeholder: '修改灵感内容，Enter 保存…',
-            submitLabel: '保存',
-            autoFocus: true,
-            value: state.editing.initialText,
-            onSubmit: (value) => saveEdit($, state, value),
-          }),
-        ],
-      }));
-    } else {
-      sections.push(Box({
-        key: 'draft-box',
-        marginBottom: 1,
-        children: [
-          Input({
-            key: 'draft-' + state.draftSeq,
-            label: '+ ',
-            placeholder: '记下补充灵感，Enter 入池…',
-            submitLabel: '入池',
-            value: '',
-            onSubmit: (value) => submitDraft($, state, value),
-          }),
-        ],
-      }));
-    }
-  }
+  const primary = renderComposerOrNotice($, state, ui, snapshot, canWrite);
+  if (primary) sections.push(primary);
 
   if (canWrite && !items.length) {
     sections.push(Text({
@@ -723,24 +766,26 @@ async function handleFonsCommand($, state, rawArgs) {
     const result = await openWebPanel($, state);
     return { text: result.ok ? '已在浏览器打开 Fons 网页版面板。' : (result.error || '无法打开 Fons 网页版面板。') };
   }
-  const lines = arg.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = splitDraftLines(arg);
   const response = await runPoolOp($, state, { op: 'add', data: { texts: lines } });
   if (!response.ok) return { text: '入池失败：' + (response.error || '未知错误') };
   return { text: '已加入 Fons 灵感池：' + lines.join(' / ') };
 }
 
+async function tickCountdown($, state) {
+  const now = await $.clock.now();
+  const active = hasActiveCountdown(state, now);
+  if (active || state.hadActiveCountdown) {
+    state.hadActiveCountdown = active;
+    $.ui.invalidate('ui.render');
+  }
+}
+
 function startTimers($, state) {
   state.tickTimer?.cancel();
   state.tickTimer = $.clock.every(TICK_MS, () => {
-    void (async () => {
-      if (!state.isOpen) return;
-      const now = await $.clock.now();
-      const active = hasActiveCountdown(state, now);
-      if (active || state.hadActiveCountdown) {
-        state.hadActiveCountdown = active;
-        $.ui.invalidate('ui.render');
-      }
-    })().catch(() => undefined);
+    if (!state.isOpen) return;
+    void tickCountdown($, state).catch(() => undefined);
   });
   state.pollTimer?.cancel();
   state.pollTimer = $.clock.every(POLL_MS, () => {
@@ -760,6 +805,18 @@ async function syncAndRefreshWithRetry($, state) {
   }
 }
 
+async function autoOpenOnStart($, state, surface) {
+  try {
+    await syncAndRefreshWithRetry($, state);
+    if (!state.openAtStart || state.userTouchedPane) return;
+    const surfaces = await $.session.surfaces().catch(() => []);
+    if (surface === 'terminal' || surfaces.includes('terminal')) return;
+    await openPane($, state, { focus: false, manual: false, refresh: 'if-missing' });
+  } catch (error) {
+    $.ui.log('fons auto-open failed: ' + errorMessage(error), { to: 'debug' });
+  }
+}
+
 export function register(on, options) {
   const state = createInitialState(options);
 
@@ -771,15 +828,7 @@ export function register(on, options) {
       immediate: true,
     });
     startTimers($, state);
-    $.clock.after(0, () => (async () => {
-      await syncAndRefreshWithRetry($, state);
-      if (!state.openAtStart || state.userTouchedPane) return;
-      const surfaces = await $.session.surfaces().catch(() => []);
-      if (e?.surface === 'terminal' || surfaces.includes('terminal')) return;
-      await openPane($, state, { focus: false, manual: false, refresh: 'if-missing' });
-    })().catch((error) => {
-      $.ui.log('fons auto-open failed: ' + (error instanceof Error ? error.message : String(error)), { to: 'debug' });
-    }));
+    $.clock.after(0, () => { void autoOpenOnStart($, state, e?.surface); });
     return next(e);
   });
 
@@ -801,11 +850,7 @@ export function register(on, options) {
 
   on('ui.close', ($, e, next) => {
     if (e.id === PANE_ID || e.requestId === PANE_ID) {
-      state.userTouchedPane = true;
-      state.isOpen = false;
-      state.showSettings = false;
-      void cancelEdit($, state);
-      $.ui.invalidate('ui.render');
+      void clearClosedPaneState($, state);
     }
     return next(e);
   });
@@ -834,16 +879,13 @@ export function register(on, options) {
     const drawn = await Promise.resolve(next(e)).catch(() => null);
     const below = drawn && typeof drawn === 'object' && drawn.type !== 'engine' ? drawn : null;
     const { Box, Text, Button } = $.ui.resolve(e);
-    const parts = [];
-    if (counts.buffering) parts.push('蓄水 ' + counts.buffering);
-    if (counts.delivered) parts.push('已投递 ' + counts.delivered);
     const row = Box({
       key: 'fons-band',
       flexDirection: 'row',
       gap: 1,
       children: [
         Text({ color: 'cyan', bold: true, children: '💧 Fons' }),
-        Text({ dimColor: true, children: parts.join(' · ') }),
+        Text({ dimColor: true, children: formatCountsSummary(counts) }),
         Button({ key: 'open-fons-pane', label: '打开侧栏', plain: true, onPress: () => openPane($, state, { focus: true, manual: true, refresh: 'always' }) }),
       ],
     });

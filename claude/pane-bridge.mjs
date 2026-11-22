@@ -6,11 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claudeAppData, findClaudeWorkspace } from '../adapters/claude.mjs';
+import { effectiveHome } from '../adapters/shared.mjs';
 import { isWorkspaceEnabled, readFonsConfig, resolveConfiguredDebounceMs } from '../scripts/fons-config.mjs';
-import { PANEL_URL_PATTERN, openPanelUrl, startPanelServer } from '../scripts/fons-panel.mjs';
+import { isValidPanelUrl, openPanelUrl, startPanelServer } from '../scripts/fons-panel.mjs';
 import { isValidSessionId, lookupConversation } from '../scripts/fons-store.mjs';
 import {
   applySettingsPatch, buildCurrentWorkspaceInfo, createBoundPoolRoutes, formatSettingsPayload,
+  isPlainObject,
 } from '../sidecars/fons-pool/main.mjs';
 
 const SELF_PATH = fileURLToPath(import.meta.url);
@@ -21,14 +23,6 @@ const WEB_PANEL_READY_TIMEOUT_MS = 4000;
 const WEB_PANEL_POLL_MS = 40;
 const WEB_PANEL_PROBE_TIMEOUT_MS = 600;
 const WEB_PANEL_IDLE_MS = 15 * 60 * 1000;
-
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function effectiveHome(env) {
-  return env.USERPROFILE || env.HOME || os.homedir();
-}
 
 function unwrapRouteResult(result) {
   if (Number.isInteger(result?.status) && typeof result.body === 'string') {
@@ -49,41 +43,36 @@ function resolveSessionContext({ sessionId, env, cwd }) {
   const appData = claudeAppData(env, homeDir, cwd);
   const validId = isValidSessionId(sessionId) ? sessionId : null;
   const entry = validId ? lookupConversation({ appData, sessionId: validId }) : null;
-  let matched = null;
-  if (entry && entry.host === 'claude') {
-    matched = { ...entry, sessionId: validId, appData };
-  }
-  return { appData, homeDir, validId, entry: matched };
+  const matched = entry?.host === 'claude' ? { ...entry, sessionId: validId, appData } : null;
+  return { appData, homeDir, entry: matched };
 }
 
-function readSnapshot({ sessionId, env, cwd }) {
-  const { appData, homeDir, entry } = resolveSessionContext({ sessionId, env, cwd });
-  const fallbackDebounceMs = resolveConfiguredDebounceMs({ appData, env });
-  if (!entry) {
-    const startDir = env.CLAUDE_PROJECT_DIR?.trim() || cwd;
-    const rootDir = findClaudeWorkspace(startDir, homeDir);
-    const config = readFonsConfig(appData);
-    const workspaceEnabled = rootDir ? isWorkspaceEnabled({ appData, rootDir, config }) : true;
-    const currentWorkspace = buildCurrentWorkspaceInfo({ appData, config, rootDir, detectLocalPlugin: false });
-    const settings = formatSettingsPayload({
-      config, currentWorkspace, sessionRegistered: false, canRegisterSession: false, env,
-    });
-    return {
-      ok: true,
-      registered: false,
-      scope: rootDir ? 'workspace' : 'no-workspace',
-      rootDir,
-      title: '',
-      workspaceEnabled,
-      workspaceDisabled: !workspaceEnabled,
-      items: [],
-      debounceMs: fallbackDebounceMs,
-      canArchive: false,
-      etag: '',
-      settings,
-    };
-  }
-  const routes = createBoundPoolRoutes(entry, { env });
+function readUnregisteredSnapshot({ appData, homeDir, env, cwd }) {
+  const startDir = env.CLAUDE_PROJECT_DIR?.trim() || cwd;
+  const rootDir = findClaudeWorkspace(startDir, homeDir);
+  const config = readFonsConfig(appData);
+  const workspaceEnabled = rootDir ? isWorkspaceEnabled({ appData, rootDir, config }) : true;
+  const currentWorkspace = buildCurrentWorkspaceInfo({ appData, config, rootDir, detectLocalPlugin: false });
+  const settings = formatSettingsPayload({
+    config, currentWorkspace, sessionRegistered: false, canRegisterSession: false, env,
+  });
+  return {
+    ok: true,
+    registered: false,
+    scope: rootDir ? 'workspace' : 'no-workspace',
+    rootDir,
+    title: '',
+    workspaceEnabled,
+    workspaceDisabled: !workspaceEnabled,
+    items: [],
+    debounceMs: resolveConfiguredDebounceMs({ appData, env }),
+    canArchive: false,
+    etag: '',
+    settings,
+  };
+}
+
+function readBoundSnapshot(entry, routes, { appData, env }) {
   const poolOutcome = unwrapRouteResult(routes.get('/api/pool')({}));
   if (poolOutcome.error) return { ok: false, error: poolOutcome.error };
   const settingsOutcome = unwrapRouteResult(routes.get('/api/pool/settings')({}));
@@ -98,35 +87,43 @@ function readSnapshot({ sessionId, env, cwd }) {
     title: entry.title || '',
     workspaceEnabled: !workspaceDisabled,
     workspaceDisabled,
-    items: Array.isArray(pool.items) ? pool.items : [],
-    debounceMs: typeof pool.debounceMs === 'number' ? pool.debounceMs : fallbackDebounceMs,
+    items: pool.items ?? [],
+    debounceMs: pool.debounceMs ?? resolveConfiguredDebounceMs({ appData, env }),
     canArchive: Boolean(pool.canArchive),
-    etag: typeof pool.etag === 'string' ? pool.etag : '',
+    etag: pool.etag ?? '',
     settings,
   };
 }
 
+function readSnapshot({ sessionId, env, cwd }) {
+  const { appData, homeDir, entry } = resolveSessionContext({ sessionId, env, cwd });
+  if (!entry) return readUnregisteredSnapshot({ appData, homeDir, env, cwd });
+  return readBoundSnapshot(entry, createBoundPoolRoutes(entry, { env }), { appData, env });
+}
+
 function runPoolMutation({ sessionId, op, data, env, cwd }) {
-  if (typeof op !== 'string' || !ALLOWED_POOL_OPS.has(op)) {
+  if (!ALLOWED_POOL_OPS.has(op)) {
     return { ok: false, error: '不支持的灵感池操作：' + String(op) };
   }
-  const { appData, entry } = resolveSessionContext({ sessionId, env, cwd });
+  const { appData, homeDir, entry } = resolveSessionContext({ sessionId, env, cwd });
   const body = isPlainObject(data) ? data : {};
   if (!entry) {
     if (op === 'settings' && body.update !== undefined) {
       const updated = applySettingsPatch({ appData, update: body.update, detectLocalPlugin: false });
       if (updated.error) {
-        const errorMessage = unwrapRouteResult(updated.error).error || '无效的设置参数。';
-        return { ok: false, error: errorMessage };
+        return { ok: false, error: unwrapRouteResult(updated.error).error || '无效的设置参数。' };
       }
-      return { ok: true, result: { config: updated.config }, snapshot: readSnapshot({ sessionId, env, cwd }) };
+      return {
+        ok: true,
+        result: { config: updated.config },
+        snapshot: readUnregisteredSnapshot({ appData, homeDir, env, cwd }),
+      };
     }
     return { ok: false, error: '当前会话尚未由 Fons Hook 登记，请先新开会话或稍后刷新。' };
   }
   const routes = createBoundPoolRoutes(entry, { env });
-  const handle = routes.get('/api/pool/' + op);
-  const outcome = unwrapRouteResult(handle(body));
-  const snapshot = readSnapshot({ sessionId, env, cwd });
+  const outcome = unwrapRouteResult(routes.get('/api/pool/' + op)(body));
+  const snapshot = readBoundSnapshot(entry, routes, { appData, env });
   if (outcome.error) return { ok: false, error: outcome.error, snapshot };
   return { ok: true, result: outcome.data, snapshot };
 }
@@ -142,16 +139,21 @@ function writePrivateJsonAtomic(filePath, data) {
   }
 }
 
-function probeLivePanel(panelUrl) {
-  if (typeof panelUrl !== 'string' || !PANEL_URL_PATTERN.test(panelUrl)) {
-    return Promise.resolve(false);
-  }
+function parseLivePanelUrl(panelUrl) {
+  if (!isValidPanelUrl(panelUrl)) return null;
   const parsed = new URL(panelUrl);
-  const token = parsed.hash.slice('#token='.length);
+  const port = parsed.port ? Number(parsed.port) : 80;
+  return { parsed, port, token: parsed.hash.slice('#token='.length) };
+}
+
+function probeLivePanel(panelUrl) {
+  const target = parseLivePanelUrl(panelUrl);
+  if (!target) return Promise.resolve(false);
+  const { parsed, port, token } = target;
   return new Promise((resolve) => {
     const req = http.request({
       hostname: parsed.hostname,
-      port: Number(parsed.port),
+      port,
       path: '/api/panel/context',
       method: 'POST',
       timeout: WEB_PANEL_PROBE_TIMEOUT_MS,
@@ -181,7 +183,6 @@ function sleep(ms) {
 }
 
 function readJsonReadyFile(readyFile) {
-  if (!fs.existsSync(readyFile)) return null;
   try {
     return JSON.parse(fs.readFileSync(readyFile, 'utf8'));
   } catch (error) {
@@ -190,16 +191,19 @@ function readJsonReadyFile(readyFile) {
   }
 }
 
-async function waitForReadyFile({ readyFile, timeoutMs, getSpawnError }) {
+async function waitForReadyFile({ readyFile, timeoutMs, getChildFailure }) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const spawnError = getSpawnError();
-    if (spawnError) return { error: spawnError };
     const parsed = readJsonReadyFile(readyFile);
     if (parsed !== null) return parsed;
+    const failure = getChildFailure();
+    if (failure) {
+      // Check once more so an error payload written just before exit is never masked.
+      return readJsonReadyFile(readyFile) ?? { error: failure };
+    }
     await sleep(WEB_PANEL_POLL_MS);
   }
-  return { error: '启动本地 Fons 网页版面板超时。' };
+  return readJsonReadyFile(readyFile) ?? { error: '启动本地 Fons 网页版面板超时。' };
 }
 
 function terminateChild(pid) {
@@ -226,7 +230,7 @@ async function openWebPanel({ payload, env, cwd, openBrowser = openPanelUrl }) {
     sessionId: isValidSessionId(sessionId) ? sessionId : undefined,
     scope: scope === 'no-workspace' ? 'no-workspace' : undefined,
   };
-  let spawnError = '';
+  let childFailure = '';
   let child;
   try {
     child = spawn(process.execPath, [SELF_PATH, 'serve-panel'], {
@@ -241,13 +245,16 @@ async function openWebPanel({ payload, env, cwd, openBrowser = openPanelUrl }) {
       },
     });
     child.on('error', (error) => {
-      spawnError = error?.message || '启动本地 Fons 网页版面板进程失败。';
+      childFailure ||= error?.message || '启动本地 Fons 网页版面板进程失败。';
+    });
+    child.on('exit', (code, signal) => {
+      childFailure ||= '本地 Fons 网页版面板进程提前退出（' + (signal || ('exit ' + code)) + '）。';
     });
     child.unref();
     const ready = await waitForReadyFile({
       readyFile,
       timeoutMs: WEB_PANEL_READY_TIMEOUT_MS,
-      getSpawnError: () => spawnError,
+      getChildFailure: () => childFailure,
     });
     if (ready?.error || !ready?.url) {
       terminateChild(child.pid);
@@ -270,14 +277,17 @@ async function serveDetachedPanel({ payload, env, cwd }) {
   try {
     const panel = await startPanelServer({ port: 0, selector, env, cwd });
     let idleTimer = null;
+    let closing = false;
     const shutdown = () => {
+      if (closing) return;
+      closing = true;
       if (idleTimer) clearTimeout(idleTimer);
-      void panel.close().then(() => process.exit(0));
+      void panel.close().finally(() => process.exit(0));
     };
     const resetIdle = () => {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(shutdown, WEB_PANEL_IDLE_MS);
-      idleTimer.unref?.();
+      idleTimer.unref();
     };
     panel.server.on('request', resetIdle);
     resetIdle();
@@ -289,7 +299,7 @@ async function serveDetachedPanel({ payload, env, cwd }) {
   } catch (error) {
     if (readyFile && fs.existsSync(path.dirname(readyFile))) {
       try {
-        writePrivateJsonAtomic(readyFile, { error: error.message || '启动面板失败。' });
+        writePrivateJsonAtomic(readyFile, { error: error?.message || '启动面板失败。' });
       } catch (writeError) {
         process.stderr.write(String(writeError?.message || writeError) + '\n');
       }
@@ -335,7 +345,7 @@ if (isEntryPoint()) {
       const output = await runBridgeAction({ action, payload, env: process.env, cwd: process.cwd() });
       process.stdout.write(JSON.stringify(output) + '\n');
     } catch (error) {
-      process.stdout.write(JSON.stringify({ ok: false, error: error.message || 'Fons 桥接执行失败。' }) + '\n');
+      process.stdout.write(JSON.stringify({ ok: false, error: error?.message || 'Fons 桥接执行失败。' }) + '\n');
       process.exitCode = 1;
     }
   }

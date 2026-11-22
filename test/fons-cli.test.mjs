@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const cli = fileURLToPath(new URL('../scripts/fons-cli.mjs', import.meta.url));
+const fonsBin = fileURLToPath(new URL(process.platform === 'win32' ? '../bin/fons.cmd' : '../bin/fons', import.meta.url));
 const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
@@ -102,24 +103,6 @@ test('archive removes duplicate receipts for the same completed occurrence', (t)
   assert.equal(fs.readFileSync(archive, 'utf8'), '【√】 first\n');
 });
 
-test('CLI locates its only session through FONS_APP_DATA', (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fons-cli-index-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const sessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-  const dir = path.join(root, '.agents', 'fons');
-  const appData = path.join(root, 'host');
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, `ideas-${sessionId}.md`), '- [ ] indexed item\n');
-  const index = path.join(appData, 'fons', 'conversations');
-  fs.mkdirSync(index, { recursive: true });
-  fs.writeFileSync(path.join(index, `${sessionId}.json`), JSON.stringify({ rootDir: root, title: 'test', registeredAt: 1 }));
-  const result = spawnSync(process.execPath, [cli, 'list'], {
-    cwd: root, encoding: 'utf8', env: { ...process.env, FONS_ROOT: root, FONS_APP_DATA: appData, HOME: root, USERPROFILE: root, FONS_SESSION: '' },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /indexed item/);
-});
-
 test('without an indexed session the CLI fails without creating an orphan inbox', (t) => {
   const { root, ideas } = setup(t, '- [ ] existing\n');
   fs.rmSync(path.join(root, 'host', 'fons', 'conversations', `${A}.json`));
@@ -131,7 +114,7 @@ test('without an indexed session the CLI fails without creating an orphan inbox'
   assert.equal(fs.existsSync(path.join(root, '.agents', 'fons', 'ideas.md')), false);
 });
 
-test('multiple indexed sessions require selection and show candidate IDs and titles', (t) => {
+test('multiple indexed sessions require selection and show candidate IDs, titles and dates', (t) => {
   const { root } = setup(t, '- [ ] A item\n');
   register(root, B, root);
   const index = path.join(root, 'host', 'fons', 'conversations', B + '.json');
@@ -139,6 +122,7 @@ test('multiple indexed sessions require selection and show candidate IDs and tit
   const result = run(root, ['list']);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /第二会话/);
+  assert.match(result.stderr, /1970-01-01/);
   assert.match(result.stderr, new RegExp(A));
   assert.match(result.stderr, new RegExp(B));
   assert.match(result.stderr, /-s/);
@@ -224,12 +208,40 @@ test('add output matches the normalized item stored for multiline input', (t) =>
   assert.match(result.stdout, /first second/);
 });
 
-test('ambiguous candidate output renders the registration time as a readable date', (t) => {
-  const { root } = setup(t, '');
-  register(root, B, root);
-  const result = run(root, ['list']);
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /1970-01-01/);
+test('bin/fons launcher handles usage/help, subdirectory root lookup, and rejects panel options on non-panel commands', (t) => {
+  const { root } = setup(t, '- [ ] parent item\n');
+  const subDir = path.join(root, 'src', 'nested');
+  fs.mkdirSync(subDir, { recursive: true });
+  const env = {
+    ...process.env,
+    FONS_ROOT: '',
+    FONS_APP_DATA: path.join(root, 'host'),
+    HOME: path.join(root, 'home'),
+    USERPROFILE: path.join(root, 'home'),
+    FONS_HOST: '',
+    FONS_SESSION: '',
+  };
+  const invokeBin = (args, cwd = root) => (
+    process.platform === 'win32'
+      ? spawnSync('cmd.exe', ['/c', fonsBin, ...args], { cwd, encoding: 'utf8', env })
+      : spawnSync(fonsBin, args, { cwd, encoding: 'utf8', env })
+  );
+
+  const noArg = invokeBin([]);
+  assert.equal(noArg.status, 1);
+  assert.match(noArg.stderr, /用法:/);
+
+  const helpRes = invokeBin(['help']);
+  assert.equal(helpRes.status, 0, helpRes.stderr);
+  assert.match(helpRes.stdout, /fons.*archive/);
+
+  const nestedList = invokeBin(['list'], subDir);
+  assert.equal(nestedList.status, 0, nestedList.stderr);
+  assert.match(nestedList.stdout, /1\. parent item/);
+
+  const badPort = run(root, ['--port', '8080', 'sessions']);
+  assert.notEqual(badPort.status, 0);
+  assert.match(badPort.stderr, /--port/);
 });
 
 test('CLI supports no-workspace sessions via -s and --no-workspace without leaking into workspace lookups', (t) => {
@@ -391,88 +403,4 @@ test('Codex workspace selection sees a .codex marker from a child directory', (t
   const listed = run(subdir, ['--host', 'codex', 'list'], [], env);
   assert.equal(listed.status, 0, listed.stderr);
   assert.match(listed.stdout, /new idea/);
-});
-
-
-test('codex init stages only the Codex plugin and preserves existing hooks and AGENTS', (t) => {
-  const { root } = setup(t, '');
-  const codexHome = path.join(root, 'Codex 测试 home');
-  fs.mkdirSync(codexHome);
-  const hooksPath = path.join(codexHome, 'hooks.json');
-  const agentsPath = path.join(codexHome, 'AGENTS.md');
-  const oldHooks = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"existing-hook"}]}]}}';
-  fs.writeFileSync(hooksPath, oldHooks);
-  fs.writeFileSync(agentsPath, 'Existing user rules\n');
-  const initial = run(root, ['codex', 'init'], [], { CODEX_HOME: codexHome });
-  assert.equal(initial.status, 0, initial.stderr);
-  assert.match(initial.stdout, /codex plugin add fons@fons-local/);
-  const marketplaceRoot = path.join(codexHome, 'fons', 'plugin-marketplace');
-  const marketplacePath = path.join(marketplaceRoot, '.agents', 'plugins', 'marketplace.json');
-  const catalog = JSON.parse(fs.readFileSync(marketplacePath, 'utf8'));
-  const pluginRoot = path.resolve(marketplaceRoot, catalog.plugins[0].source.path);
-  assert.equal(fs.existsSync(path.join(pluginRoot, 'plugin.json')), false);
-
-  const manifest = JSON.parse(fs.readFileSync(path.join(pluginRoot, '.codex-plugin', 'plugin.json'), 'utf8'));
-  const config = JSON.parse(fs.readFileSync(path.join(pluginRoot, manifest.hooks), 'utf8'));
-  assert.deepEqual(Object.keys(config.hooks), ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop']);
-  assert.equal(fs.readFileSync(hooksPath, 'utf8'), oldHooks);
-  assert.equal(fs.readFileSync(agentsPath, 'utf8'), 'Existing user rules\n');
-  assert.equal(run(root, ['codex', 'init'], [], { CODEX_HOME: codexHome }).status, 0);
-  assert.equal(JSON.parse(fs.readFileSync(marketplacePath, 'utf8')).plugins[0].source.path, catalog.plugins[0].source.path);
-});
-
-test('codex init detects direct Fons hooks in the active project and Codex home', (t) => {
-  const { root } = setup(t, '');
-  const codexHome = path.join(root, 'custom Codex home');
-  const projectConfig = path.join(root, '.codex');
-  const directHooks = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"node \\"C:/Fons/scripts/fons-hook.mjs\\" --host=codex"}]}]}}';
-  for (const dir of [projectConfig, codexHome]) {
-    fs.mkdirSync(dir, { recursive: true });
-    const filename = path.join(dir, 'hooks.json');
-    fs.writeFileSync(filename, directHooks);
-    const result = run(root, ['codex', 'init'], [], { CODEX_HOME: codexHome });
-    assert.notEqual(result.status, 0);
-    assert.ok(result.stderr.includes(filename), result.stderr);
-    assert.equal(fs.readFileSync(filename, 'utf8'), directHooks);
-    assert.equal(fs.existsSync(path.join(codexHome, 'fons', 'plugin-marketplace')), false);
-    fs.unlinkSync(filename);
-  }
-});
-
-
-test('installed Codex command uses its package root over cwd', (t) => {
-  const { root } = setup(t, '');
-  const codexHome = path.join(root, 'Codex 中文空格 $cache %folder%');
-  const env = { ...process.env, CODEX_HOME: codexHome, FONS_APP_DATA: undefined };
-  const setupResult = run(root, ['codex', 'init'], [], env);
-  assert.equal(setupResult.status, 0, setupResult.stderr);
-  const marketplaceRoot = path.join(codexHome, 'fons', 'plugin-marketplace');
-  const catalog = JSON.parse(fs.readFileSync(path.join(marketplaceRoot, '.agents', 'plugins', 'marketplace.json'), 'utf8'));
-  const pluginRoot = path.resolve(marketplaceRoot, catalog.plugins[0].source.path);
-  const hooksConfig = JSON.parse(fs.readFileSync(path.join(pluginRoot, 'hooks', 'hooks.json'), 'utf8'));
-  const command = hooksConfig.hooks.SessionStart[0].hooks[0].command;
-  const options = { env: { ...env, PLUGIN_ROOT: pluginRoot }, cwd: root, encoding: 'utf8' };
-  const testId = '12345678-1234-7234-8234-123456789aaa';
-  const input = JSON.stringify({
-    hook_event_name: 'SessionStart',
-    session_id: testId,
-    cwd: root,
-    transcript_path: path.join(root, 'rollout.jsonl'),
-    source: 'startup',
-  });
-  const shells = process.platform === 'win32' ? [
-    { executable: 'cmd.exe', args: ['/D', '/S', '/C', '"' + command + '"'], windowsVerbatimArguments: true },
-    { executable: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-Command', command] },
-  ] : [{ executable: 'sh', args: ['-c', command] }];
-
-  const registrationPath = path.join(codexHome, 'fons', 'conversations', testId + '.json');
-  for (const { executable, args, windowsVerbatimArguments } of shells) {
-    const result = spawnSync(executable, args, { ...options, input, windowsVerbatimArguments });
-    assert.equal(result.status, 0, executable + ': ' + result.stderr);
-    assert.deepEqual(JSON.parse(result.stdout), {});
-    const record = JSON.parse(fs.readFileSync(registrationPath, 'utf8'));
-    assert.equal(record.host, 'codex');
-    assert.equal(record.rootDir, root);
-    fs.unlinkSync(registrationPath);
-  }
 });

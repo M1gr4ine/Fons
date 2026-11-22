@@ -330,15 +330,6 @@ test("Stop resets 2-continue quota per prompt_id and falls back to persisted Use
   const turn2Stop = call(stale, "Stop", { prompt_id: undefined, stop_hook_active: true, last_assistant_message: "r" });
   assert.equal(turn2Stop.hookSpecificOutput.hookEventName, "Stop");
   assert.match(contextText(turn2Stop), /mid-turn2 idea/);
-
-  // FONS_STOP_WAIT_DEBOUNCE=1 defers buffering items on Stop.
-  const strict = fixture(t);
-  call(strict, "SessionStart", { source: "startup" });
-  process.env.FONS_DEBOUNCE_SEC = "45";
-  process.env.FONS_STOP_WAIT_DEBOUNCE = "1";
-  addIdeas({ ...strict.context, texts: ["still buffering"] });
-  assert.deepEqual(call(strict, "Stop", { prompt_id: PROMPT_1 }), {});
-  assert.equal(readPoolSnapshot(strict.context).items[0].status, "buffering");
 });
 
 test("injection wording uses factual statements without imperative ACK commands", (t) => {

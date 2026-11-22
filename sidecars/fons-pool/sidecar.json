@@ -3,7 +3,7 @@
   "args": ["main.mjs"],
   "restart_policy": "always",
   "display_name": "灵感池",
-  "description": "Fons 本会话灵感池：每个会话独立的非紧急补充收件箱，消抖注入，模型完成后自动打钩。",
+  "description": "Fons 本会话灵感池：每条灵感独立蓄水消抖，模型完成后自动打钩。",
   "has_web_ui": true,
   "agent_permissions": { "allows_user_interactions": false },
   "ui_config": {

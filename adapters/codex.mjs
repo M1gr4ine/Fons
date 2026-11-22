@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { formatRetractedIdea } from "../scripts/fons-inbox.mjs";
 import { isWorkspaceEnabled } from "../scripts/fons-config.mjs";
@@ -10,14 +9,12 @@ import {
   registerConversation, sessionPaths, withPoolWrite,
 } from "../scripts/fons-store.mjs";
 import {
-  absolutePath, asIdentifier, findMarkedWorkspace, formatDeliveredLine, matchesScope, matchesTranscriptAnchor,
-  pathKey, standardPoolPolicy, withLockFallback,
+  START_SOURCES, UNREADABLE_LOG, absolutePath, asIdentifier, findMarkedWorkspace, formatDeliveredLine, hostAppData,
+  matchesScope, matchesTranscriptAnchor, pathKey, standardPoolPolicy, withLockFallback,
 } from "./shared.mjs";
 
 const HOST = "codex";
 const HOOK_EVENTS = new Set(["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"]);
-const START_SOURCES = new Set(["startup", "resume", "clear", "compact", "fork"]);
-const UNREADABLE_LOG = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM", "EISDIR"]);
 const START_EVENTS = new Set(["task_started", "turn_started"]);
 const ABORT_EVENTS = new Set(["turn_aborted", "TurnAborted"]);
 const INTERRUPTED = new Set(["interrupted", "aborted", "user_interrupt", "user_interrupted", "turn_aborted"]);
@@ -29,12 +26,11 @@ const ACK_HINT = "[FONS] 完成后末行附 [FONS_ACK: 编号]（勿改收件箱
 const STOP_HEADER = "[FONS 收尾核对] 以下补充待处理";
 const RETRACTION_HEADER = "[FONS 撤回] 用户已撤回以下补充，若尚未执行请跳过：";
 
-export function codexAppData(env = process.env, homeDir = os.homedir(), cwd = process.cwd()) {
-  const configured = env.CODEX_HOME?.trim();
-  return configured ? path.resolve(cwd, configured) : path.resolve(homeDir, ".codex");
+export function codexAppData(env = process.env, homeDir, cwd = process.cwd()) {
+  return hostAppData("CODEX_HOME", ".codex", env, homeDir, cwd);
 }
 
-export function findCodexWorkspace(cwd, homeDir = os.homedir()) {
+export function findCodexWorkspace(cwd, homeDir) {
   return findMarkedWorkspace(cwd, MARKERS, homeDir);
 }
 
@@ -133,11 +129,12 @@ function canReplaceAnchor(existing, replacement, sessionId) {
 function updateAnchor(input, scopeMode, context, existing) {
   const { transcriptPath } = context;
   if (existing.host !== HOST || !matchesScope(scopeMode, existing.scope) || !transcriptPath) return;
+  if (existing.scope === "workspace" && !isWorkspaceEnabled({ appData: context.appData, rootDir: existing.rootDir })) return;
   if (pathKey(transcriptPath) === pathKey(existing.transcriptPath) || input.source !== "resume") return;
   const replacement = readSessionHeader(transcriptPath);
   if (!canReplaceAnchor(existing, replacement, context.sessionId)) return;
   withPoolWrite({ ...existing, sessionId: context.sessionId }, () => {
-    bindConversationTranscript({ ...context, expectedTranscriptPath: existing.transcriptPath });
+    bindConversationTranscript({ ...context, expectedTranscriptPath: existing.transcriptPath, host: HOST });
   });
 }
 
@@ -152,10 +149,6 @@ function registerStart(input, scopeMode, context) {
   if (!matchesScope(scopeMode, scope)) return;
   if (scope === "workspace" && !isWorkspaceEnabled({ appData: context.appData, rootDir })) return;
   registerConversation({ ...context, rootDir, scope, host: HOST });
-}
-
-function matchesAnchor(entry, context, scopeMode) {
-  return matchesTranscriptAnchor({ entry, context, scopeMode, host: HOST });
 }
 
 function digestLine(line) {
@@ -312,7 +305,7 @@ function applyHook(input, scopeMode) {
     return {};
   }
   const entry = lookupConversation(context);
-  if (!matchesAnchor(entry, context, scopeMode)) return {};
+  if (!matchesTranscriptAnchor({ entry, context, scopeMode, host: HOST })) return {};
   return handlePoolHook(input, { ...context, ...entry });
 }
 

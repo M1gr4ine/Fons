@@ -68,6 +68,25 @@ test('registration resolves from the selected app data without overwriting an ex
   assert.equal(record.title, 'first');
   assert.equal(store.lookupConversation({ appData, sessionId: B }), null);
   assert.throws(() => store.lookupConversation({ appData, sessionId: '../x' }));
+
+  // Concurrent deletion between unlocked check and lock acquisition must not recreate a partial pointer.
+  const indexFile = path.join(appData, 'fons', 'conversations', `${A}.json`);
+  const originalRead = fs.readFileSync;
+  let removed = false;
+  fs.readFileSync = function (file, ...args) {
+    const content = originalRead.call(this, file, ...args);
+    if (!removed && String(file) === indexFile) {
+      removed = true;
+      fs.unlinkSync(indexFile);
+    }
+    return content;
+  };
+  try {
+    store.markConversationLifecycle({ appData, sessionId: A, endedAt: 12345 });
+  } finally {
+    fs.readFileSync = originalRead;
+  }
+  assert.equal(fs.existsSync(indexFile), false);
 });
 
 test('add normalizes text, preserves CRLF and does not alter other sessions', (t) => {
@@ -352,18 +371,7 @@ test('concurrent registration publishes one complete immutable pointer and retur
   assert.equal(first.title, first.rootDir === 'root-a' ? 'title-a' : 'title-b');
 });
 
-test('default debounce is 45 seconds and per-item editing hold freezes only the held item and safely expires', (t) => {
-  const saved = process.env.FONS_DEBOUNCE_SEC;
-  t.after(() => {
-    if (saved === undefined) delete process.env.FONS_DEBOUNCE_SEC;
-    else process.env.FONS_DEBOUNCE_SEC = saved;
-  });
-  delete process.env.FONS_DEBOUNCE_SEC;
-  assert.equal(store.resolveDebounceMs(), 45000);
-  process.env.FONS_DEBOUNCE_SEC = 'invalid';
-  assert.equal(store.resolveDebounceMs(), 45000);
-  delete process.env.FONS_DEBOUNCE_SEC;
-
+test('per-item editing hold freezes only the held item, applies at zero debounce, and safely expires', (t) => {
   const ctx = fixture(t);
   store.addIdeas({ ...ctx, texts: ['first', 'second'] });
   const baseAt = 10000;
@@ -373,7 +381,7 @@ test('default debounce is 45 seconds and per-item editing hold freezes only the 
   const secondId = item(ctx, 'second').id;
 
   assert.equal(store.holdEditing({ ...ctx, id: secondId, now: 25000 }).editingHold, true);
-  const heldMid = store.readPoolSnapshot({ ...ctx, now: 32000 });
+  const heldMid = store.readPoolSnapshot({ ...ctx, debounceMs: 45000, now: 32000 });
   const firstMid = heldMid.items.find((row) => row.id === firstId);
   const secondMid = heldMid.items.find((row) => row.id === secondId);
   assert.equal(firstMid.editingHold, false);
@@ -381,16 +389,21 @@ test('default debounce is 45 seconds and per-item editing hold freezes only the 
   assert.equal(secondMid.editingHold, true);
   assert.equal(secondMid.remainingMs, 30000);
 
+  // Zero debounce still respects active editing hold on the held item only.
+  const zeroDebounce = store.computeDebounce({ ...store.readPoolData(ctx), debounceMs: 0, now: 32000 });
+  assert.deepEqual(zeroDebounce.ready.map((row) => row.id), [firstId]);
+  assert.equal(zeroDebounce.byId.get(secondId).editingHold, true);
+
   assert.equal(store.holdEditing({ ...ctx, id: secondId, now: 35000 }).editingHold, true);
-  assert.equal(store.readPoolSnapshot({ ...ctx, now: 42000 }).items.find((row) => row.id === secondId).remainingMs, 30000);
+  assert.equal(store.readPoolSnapshot({ ...ctx, debounceMs: 45000, now: 42000 }).items.find((row) => row.id === secondId).remainingMs, 30000);
 
   store.releaseEditing({ ...ctx, id: secondId, now: 45000 });
-  const afterRelease = store.readPoolSnapshot({ ...ctx, now: 50000 }).items.find((row) => row.id === secondId);
+  const afterRelease = store.readPoolSnapshot({ ...ctx, debounceMs: 45000, now: 50000 }).items.find((row) => row.id === secondId);
   assert.equal(afterRelease.editingHold, false);
   assert.equal(afterRelease.remainingMs, 25000);
 
   store.holdEditing({ ...ctx, id: secondId, now: 50000 });
-  const afterLeaseExpiry = store.readPoolSnapshot({ ...ctx, now: 70000 }).items.find((row) => row.id === secondId);
+  const afterLeaseExpiry = store.readPoolSnapshot({ ...ctx, debounceMs: 45000, now: 70000 }).items.find((row) => row.id === secondId);
   assert.equal(afterLeaseExpiry.editingHold, false);
   assert.equal(afterLeaseExpiry.remainingMs, 20000);
 });
@@ -420,6 +433,8 @@ test('no-workspace conversations isolate from workspaces and support full pool C
   const legacyEntry = store.lookupConversation({ appData, sessionId: legacyId });
   assert.equal(legacyEntry.scope, 'workspace');
   assert.equal(legacyEntry.rootDir, ctx.rootDir);
+  assert.equal(legacyEntry.host, 'antigravity');
+  assert.equal(legacyEntry.transcriptPath, null);
 
   assert.deepEqual(store.listConversations({ appData, scope: 'no-workspace' }).map((e) => e.sessionId), [A]);
   assert.deepEqual(store.listConversations({ appData, rootDir: ctx.rootDir }).map((e) => e.sessionId).sort(), [B, legacyId]);
@@ -565,8 +580,14 @@ test('editing an idea preserves leading list characters like "- " and single "-"
   assert.equal(snapshot(ctx).items[0].text, '-');
 });
 
-test('attachment bounds and foreign storedName references are rejected cleanly', (t) => {
+test('attachment bounds, non-array lists, missing tokens, and update write failure cleanup behave safely', (t) => {
   const ctx = fixture(t);
+  for (const invalidList of [null, {}, 'not-an-array']) {
+    assert.throws(
+      () => store.addIdeas({ ...ctx, texts: ['bad'], attachments: invalidList }),
+      { code: 'FONS_INVALID_ATTACHMENT' },
+    );
+  }
   assert.throws(
     () => store.addIdeas({ ...ctx, texts: ['empty'], attachments: [{ name: 'empty.png', dataBase64: '' }] }),
     { code: 'FONS_INVALID_ATTACHMENT' },
@@ -585,9 +606,33 @@ test('attachment bounds and foreign storedName references are rejected cleanly',
 
   store.addIdeas({ ...ctx, texts: ['plain'] });
   const plain = snapshot(ctx).items[0];
+  assert.throws(() => store.completeIdea(ctx), /fons list/);
+  assert.throws(
+    () => store.updateIdeaText({ ...mutation(ctx, plain), newText: 'plain', newAttachments: 'bad' }),
+    { code: 'FONS_INVALID_ATTACHMENT' },
+  );
   assert.throws(
     () => store.updateIdeaText({ ...mutation(ctx, plain), newText: 'plain', keepAttachments: ['foreign-12345678.png'] }),
     { code: 'FONS_INVALID_ATTACHMENT' },
   );
+
+  // If writing ideas.md fails during updateIdeaText, newly created attachment files are rolled back.
+  const originalWrite = fs.writeFileSync;
+  fs.writeFileSync = function (file, ...args) {
+    if (String(file) === paths(ctx).ideas) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+    return originalWrite.call(this, file, ...args);
+  };
+  try {
+    assert.throws(
+      () => store.updateIdeaText({
+        ...mutation(ctx, plain),
+        newText: 'plain',
+        newAttachments: [{ name: 'rollback.png', mimeType: 'image/png', buffer: Buffer.from('png') }],
+      }),
+      /disk full/,
+    );
+  } finally {
+    fs.writeFileSync = originalWrite;
+  }
   assert.equal(fs.existsSync(paths(ctx).attachmentsDir), false);
 });

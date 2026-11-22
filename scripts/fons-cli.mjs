@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { splitIdeaText } from './fons-inbox.mjs';
 import {
-  MAX_ATTACHMENT_BYTES, MAX_ITEM_ATTACHMENTS, addIdeas, archiveCompleted, completeIdea, readPoolSnapshot,
+  MAX_ATTACHMENT_BYTES, MAX_ITEM_ATTACHMENTS, addIdeas, archiveCompleted, completeIdea, readPoolData,
 } from './fons-store.mjs';
 import { formatSessions, listSessions, resolveSession } from './fons-sessions.mjs';
 import { openPanelUrl, startPanelServer } from './fons-panel.mjs';
@@ -103,7 +103,7 @@ function formatDisplayText(text, sessionId) {
 
 function cmdList(context) {
   const seen = new Set();
-  const active = readPoolSnapshot(context).items.filter((item) => {
+  const active = readPoolData(context).items.filter((item) => {
     if (item.status === 'done' || seen.has(item.text)) return false;
     seen.add(item.text);
     return true;
@@ -142,7 +142,7 @@ function loadCliAttachments(attachPaths) {
   });
 }
 
-function cmdAdd(context, rawArgs, attachPaths = []) {
+function cmdAdd(context, rawArgs, attachPaths) {
   const attachments = loadCliAttachments(attachPaths);
   const texts = rawArgs.length ? [rawArgs.join(' ')] : [];
   const result = addIdeas({ ...context, texts, attachments });
@@ -150,14 +150,23 @@ function cmdAdd(context, rawArgs, attachPaths = []) {
   process.stdout.write('已记录灵感：' + formatDisplayText(result.texts[0], context.sessionId) + '\n');
 }
 
-function run(context, args, attachPaths) {
-  const isBuiltinSubcmd = (args[0] === 'list' && args.length === 1) || args[0] === 'done' || args[0] === 'archive';
-  if (attachPaths.length && isBuiltinSubcmd) {
-    throw new Error(`"${args[0]}" 子命令不支持 -a/--attach 参数。`);
+function rejectAttachments(attachPaths, commandName) {
+  if (attachPaths.length) {
+    throw new Error(`"${commandName}" 子命令不支持 -a/--attach 参数。`);
   }
-  if (args[0] === 'list' && args.length === 1) return cmdList(context);
-  if (args[0] === 'done') return cmdDone(context, args.slice(1));
+}
+
+function run(context, args, attachPaths) {
+  if (args[0] === 'list' && args.length === 1) {
+    rejectAttachments(attachPaths, 'list');
+    return cmdList(context);
+  }
+  if (args[0] === 'done') {
+    rejectAttachments(attachPaths, 'done');
+    return cmdDone(context, args.slice(1));
+  }
   if (args[0] === 'archive') {
+    rejectAttachments(attachPaths, 'archive');
     if (args.length !== 1) throw new Error('不支持的参数 "' + args.slice(1).join(' ') + '"。');
     return cmdArchive(context);
   }
@@ -196,12 +205,12 @@ function cmdClaudeInit(options) {
 
 function cmdSessions(options) {
   rejectPanelOptions(options);
-  if (options.attachPaths.length) throw new Error('sessions 不支持 -a/--attach 参数。');
+  rejectAttachments(options.attachPaths, 'sessions');
   process.stdout.write(formatSessions(listSessions(options)) + '\n');
 }
 
 async function cmdPanel(options) {
-  if (options.attachPaths.length) throw new Error('panel 不支持 -a/--attach 参数。');
+  rejectAttachments(options.attachPaths, 'panel');
   const selector = { sessionId: options.sessionId, host: options.host, scope: options.scope };
   const panel = await startPanelServer({ port: options.port, selector });
   process.stdout.write('Fons 灵感池面板已启动：' + panel.url + '\n按 Ctrl+C 停止服务。\n');

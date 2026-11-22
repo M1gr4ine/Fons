@@ -19,7 +19,7 @@ function hookIsFons(hook) {
   return commandIsFons(hook?.command) || (Array.isArray(hook?.args) && hook.args.some(commandIsFons));
 }
 
-export function hasFonsHooks(config) {
+function hasFonsHooks(config) {
   return Object.values(config?.hooks ?? {}).some((groups) => Array.isArray(groups)
     && groups.some((group) => Array.isArray(group?.hooks) && group.hooks.some(hookIsFons)));
 }

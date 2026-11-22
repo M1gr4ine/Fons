@@ -18,14 +18,19 @@ export function evaluateHook(input, scopeMode = "all", host = "antigravity") {
   return adapters[host](input, scopeMode);
 }
 
+function parseHookInput(raw) {
+  if (!raw.trim()) return {};
+  const parsed = JSON.parse(raw);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+}
+
 export function runMain(argv = process.argv.slice(2)) {
   const scopeMode = readOption(argv, "--scope", "all");
   if (!["all", "workspace", "no-workspace", "global"].includes(scopeMode)) {
     throw new Error("无效的 Hook 作用域：" + scopeMode);
   }
   const host = readOption(argv, "--host", "antigravity");
-  const rawInput = fs.readFileSync(0, "utf8");
-  const input = rawInput ? JSON.parse(rawInput) : {};
+  const input = parseHookInput(fs.readFileSync(0, "utf8"));
   process.stdout.write(JSON.stringify(evaluateHook(input, scopeMode, host)));
 }
 

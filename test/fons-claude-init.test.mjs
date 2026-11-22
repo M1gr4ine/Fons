@@ -168,11 +168,8 @@ test('claude init blocks direct fons-hook.mjs conflicts across settings files wi
   );
   fs.unlinkSync(overrideSettings);
 
-  // CLI rejects session/panel options on claude init and panel options on non-panel commands.
+  // CLI rejects session/panel options on claude init.
   assert.notEqual(spawnSync(process.execPath, [CLI, '--host', 'claude', 'claude', 'init'], {
-    cwd: ctx.project, encoding: 'utf8', env: ctx.env,
-  }).status, 0);
-  assert.notEqual(spawnSync(process.execPath, [CLI, '--port', '8080', 'sessions'], {
     cwd: ctx.project, encoding: 'utf8', env: ctx.env,
   }).status, 0);
 

@@ -84,7 +84,38 @@ function renderText(node) {
     .join('\n');
 }
 
-function createFakeHost({ env, sessionId, cwd, surfaces = ['desktop'] }) {
+function findNode(node, predicate) {
+  return collectNodes(node).find(predicate);
+}
+
+function createBridgeCaller(ctx) {
+  return (action, payload, extra = {}) => runBridgeAction({
+    action,
+    payload,
+    env: extra.env ?? ctx.env,
+    cwd: extra.cwd ?? ctx.project,
+    ...(extra.openBrowser ? { openBrowser: extra.openBrowser } : {}),
+  });
+}
+
+async function killAndWait(pid) {
+  try { process.kill(pid, 'SIGTERM'); } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+    return;
+  }
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+function createFakeHost({ env, sessionId, cwd, surfaces = ['desktop'], runProcess }) {
   const handlers = [];
   const commands = new Map();
   const openPanes = new Map();
@@ -112,6 +143,16 @@ function createFakeHost({ env, sessionId, cwd, surfaces = ['desktop'] }) {
     Input: uiFactory('Input'),
   };
 
+  const defaultRunProcess = async (argv, init = {}) => {
+    const proc = spawnSync(argv[0], argv.slice(1), {
+      cwd: init.cwd || cwd,
+      encoding: 'utf8',
+      env: { ...env, ...(init.env || {}) },
+      timeout: init.timeoutMs || 8000,
+    });
+    return { exitCode: proc.status ?? 1, stdout: proc.stdout || '', stderr: proc.stderr || '' };
+  };
+
   const $ = {
     env: { get: async (name) => env[name] },
     fs: {
@@ -120,13 +161,7 @@ function createFakeHost({ env, sessionId, cwd, surfaces = ['desktop'] }) {
     },
     process: {
       run: async (argv, init = {}) => {
-        const proc = spawnSync(argv[0], argv.slice(1), {
-          cwd: init.cwd || cwd,
-          encoding: 'utf8',
-          env: { ...env, ...(init.env || {}) },
-          timeout: init.timeoutMs || 8000,
-        });
-        const result = { exitCode: proc.status ?? 1, stdout: proc.stdout || '', stderr: proc.stderr || '' };
+        const result = await (runProcess ? runProcess(argv, init, defaultRunProcess) : defaultRunProcess(argv, init));
         notifyWaiters();
         return result;
       },
@@ -201,6 +236,9 @@ function createFakeHost({ env, sessionId, cwd, surfaces = ['desktop'] }) {
     return next(payload);
   };
 
+  const renderPane = (surface = 'desktop', props = {}) =>
+    dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface, props });
+
   const waitUntil = (predicate, timeoutMs = 4000) => {
     if (predicate()) return Promise.resolve();
     return new Promise((resolve, reject) => {
@@ -218,22 +256,20 @@ function createFakeHost({ env, sessionId, cwd, surfaces = ['desktop'] }) {
   };
 
   return {
-    $, on, dispatch, commands, openPanes, toasts, timers, waitUntil,
+    $, on, dispatch, renderPane, commands, openPanes, toasts, timers, waitUntil,
     setSessionId(nextId) { currentSessionId = nextId; },
     advanceTime(ms) { nowMs += ms; },
     get invalidations() { return invalidations; },
   };
 }
 
-test('pane-bridge handles unregistered snapshot, env isolation, validation, full pool lifecycle, and web panel reuse', async (t) => {
+test('pane-bridge handles unregistered snapshot, env isolation, settings updates, and input validation', async (t) => {
   const ctx = setupEnv(t);
+  const bridge = createBridgeCaller(ctx);
 
   // Explicit env overrides process.env inside readSnapshot.
-  const withEnvDebounce = await runBridgeAction({
-    action: 'snapshot',
-    payload: { sessionId: ctx.sessionId },
+  const withEnvDebounce = await bridge('snapshot', { sessionId: ctx.sessionId }, {
     env: { ...ctx.env, FONS_DEBOUNCE_SEC: '12', FONS_STOP_WAIT_DEBOUNCE: '1' },
-    cwd: ctx.project,
   });
   assert.equal(withEnvDebounce.ok, true);
   assert.equal(withEnvDebounce.registered, false);
@@ -241,49 +277,44 @@ test('pane-bridge handles unregistered snapshot, env isolation, validation, full
   assert.equal(withEnvDebounce.settings.envOverrides.debounceSec, true);
   assert.equal(withEnvDebounce.settings.envOverrides.stopWaitDebounce, true);
 
-  // Malformed workspaceAction fails cleanly even when session is unregistered.
-  const badWorkspaceAction = await runBridgeAction({
-    action: 'pool',
-    payload: {
-      sessionId: ctx.sessionId,
-      op: 'settings',
-      data: { update: { workspaceAction: 'bad' } },
-    },
-    env: ctx.env,
-    cwd: ctx.project,
+  // Malformed workspaceAction, unknown pool op, and unknown bridge action fail cleanly.
+  const badWorkspaceAction = await bridge('pool', {
+    sessionId: ctx.sessionId,
+    op: 'settings',
+    data: { update: { workspaceAction: 'bad' } },
   });
   assert.equal(badWorkspaceAction.ok, false);
 
+  const badOp = await bridge('pool', { sessionId: ctx.sessionId, op: 'unknown-op', data: {} });
+  assert.equal(badOp.ok, false);
+
+  const badAction = await bridge('unknown-action', { sessionId: ctx.sessionId });
+  assert.equal(badAction.ok, false);
+
   // Disable and re-enable workspace before session registration.
-  const disableRes = await runBridgeAction({
-    action: 'pool',
-    payload: {
-      sessionId: ctx.sessionId,
-      op: 'settings',
-      data: { update: { workspaceAction: { path: ctx.project, mode: 'disable' } } },
-    },
-    env: ctx.env,
-    cwd: ctx.project,
+  const disableRes = await bridge('pool', {
+    sessionId: ctx.sessionId,
+    op: 'settings',
+    data: { update: { workspaceAction: { path: ctx.project, mode: 'disable' } } },
   });
   assert.equal(disableRes.ok, true);
   assert.equal(disableRes.snapshot.workspaceDisabled, true);
 
-  const enableRes = await runBridgeAction({
-    action: 'pool',
-    payload: {
-      sessionId: ctx.sessionId,
-      op: 'settings',
-      data: { update: { workspaceAction: { path: ctx.project, mode: 'enable' }, debounceSec: 30 } },
-    },
-    env: ctx.env,
-    cwd: ctx.project,
+  const enableRes = await bridge('pool', {
+    sessionId: ctx.sessionId,
+    op: 'settings',
+    data: { update: { workspaceAction: { path: ctx.project, mode: 'enable' }, debounceSec: 30 } },
   });
   assert.equal(enableRes.ok, true);
   assert.equal(enableRes.snapshot.workspaceEnabled, true);
   assert.equal(enableRes.snapshot.debounceMs, 30_000);
+});
 
-  // Register session and run full CRUD via bridge.
+test('pane-bridge executes registered pool CRUD lifecycle while preserving attachments', async (t) => {
+  const ctx = setupEnv(t);
+  const bridge = createBridgeCaller(ctx);
   registerSession(ctx);
+
   addIdeas({
     rootDir: ctx.project,
     sessionId: ctx.sessionId,
@@ -291,12 +322,7 @@ test('pane-bridge handles unregistered snapshot, env isolation, validation, full
     attachments: [{ name: 'spec.txt', buffer: Buffer.from('hello fons') }],
   });
 
-  const added = await runBridgeAction({
-    action: 'pool',
-    payload: { sessionId: ctx.sessionId, op: 'add', data: { texts: ['补权限单测'] } },
-    env: ctx.env,
-    cwd: ctx.project,
-  });
+  const added = await bridge('pool', { sessionId: ctx.sessionId, op: 'add', data: { texts: ['补权限单测'] } });
   assert.equal(added.ok, true);
   assert.equal(added.snapshot.registered, true);
   assert.equal(added.snapshot.items.length, 2);
@@ -304,29 +330,19 @@ test('pane-bridge handles unregistered snapshot, env isolation, validation, full
   // Editing preserves stored attachments when keepAttachments is supplied.
   const attItem = added.snapshot.items[0];
   assert.equal(attItem.attachments.length, 1);
-  const held = await runBridgeAction({
-    action: 'pool',
-    payload: { sessionId: ctx.sessionId, op: 'hold', data: { id: attItem.id } },
-    env: ctx.env,
-    cwd: ctx.project,
-  });
+  const held = await bridge('pool', { sessionId: ctx.sessionId, op: 'hold', data: { id: attItem.id } });
   assert.equal(held.ok, true);
   assert.equal(held.snapshot.items[0].editingHold, true);
 
-  const updated = await runBridgeAction({
-    action: 'pool',
-    payload: {
-      sessionId: ctx.sessionId,
-      op: 'update',
-      data: {
-        rowIndex: attItem.rowIndex,
-        expectedRaw: attItem.raw,
-        newText: '改写后的想法',
-        keepAttachments: [attItem.attachments[0].storedName],
-      },
+  const updated = await bridge('pool', {
+    sessionId: ctx.sessionId,
+    op: 'update',
+    data: {
+      rowIndex: attItem.rowIndex,
+      expectedRaw: attItem.raw,
+      newText: '改写后的想法',
+      keepAttachments: [attItem.attachments[0].storedName],
     },
-    env: ctx.env,
-    cwd: ctx.project,
   });
   assert.equal(updated.ok, true);
   assert.equal(updated.snapshot.items[0].note, '改写后的想法');
@@ -334,84 +350,57 @@ test('pane-bridge handles unregistered snapshot, env isolation, validation, full
 
   // Complete, reopen, complete again, and archive.
   const second = updated.snapshot.items[1];
-  const completed = await runBridgeAction({
-    action: 'pool',
-    payload: { sessionId: ctx.sessionId, op: 'complete', data: { token: second.token } },
-    env: ctx.env,
-    cwd: ctx.project,
-  });
+  const completed = await bridge('pool', { sessionId: ctx.sessionId, op: 'complete', data: { token: second.token } });
   assert.equal(completed.ok, true);
   assert.equal(completed.snapshot.canArchive, true);
 
   const doneItem = completed.snapshot.items.find((item) => item.status === 'done');
-  const reopened = await runBridgeAction({
-    action: 'pool',
-    payload: { sessionId: ctx.sessionId, op: 'reopen', data: { rowIndex: doneItem.rowIndex, expectedRaw: doneItem.raw } },
-    env: ctx.env,
-    cwd: ctx.project,
+  const reopened = await bridge('pool', {
+    sessionId: ctx.sessionId,
+    op: 'reopen',
+    data: { rowIndex: doneItem.rowIndex, expectedRaw: doneItem.raw },
   });
   assert.equal(reopened.ok, true);
   assert.equal(reopened.snapshot.canArchive, false);
 
-  const completeAgain = await runBridgeAction({
-    action: 'pool',
-    payload: { sessionId: ctx.sessionId, op: 'complete', data: { token: reopened.snapshot.items[1].token } },
-    env: ctx.env,
-    cwd: ctx.project,
+  const completeAgain = await bridge('pool', {
+    sessionId: ctx.sessionId,
+    op: 'complete',
+    data: { token: reopened.snapshot.items[1].token },
   });
   assert.equal(completeAgain.ok, true);
 
-  const archived = await runBridgeAction({
-    action: 'pool',
-    payload: { sessionId: ctx.sessionId, op: 'archive', data: {} },
-    env: ctx.env,
-    cwd: ctx.project,
-  });
+  const archived = await bridge('pool', { sessionId: ctx.sessionId, op: 'archive', data: {} });
   assert.equal(archived.ok, true);
   assert.equal(archived.result.count, 1);
   assert.equal(archived.snapshot.items.length, 1);
+});
 
-  // open-web spawns detached server, opens URL via callback, reuses live server via token probe,
-  // and respawns cleanly after the detached server exits.
+test('pane-bridge open-web spawns, reuses live server via token probe, guards invalid ports, and respawns after exit', async (t) => {
+  const ctx = setupEnv(t);
+  const bridge = createBridgeCaller(ctx);
+  registerSession(ctx);
+
   const openedUrls = [];
   const launchedPids = [];
-  const killAndWait = async (pid) => {
-    try { process.kill(pid, 'SIGTERM'); } catch (error) {
-      if (error?.code !== 'ESRCH') throw error;
-      return;
-    }
-    const deadline = Date.now() + 2000;
-    while (Date.now() < deadline) {
-      try {
-        process.kill(pid, 0);
-      } catch (error) {
-        if (error?.code === 'ESRCH') return;
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  };
+  const openBrowser = (url) => openedUrls.push(url);
   try {
-    const firstOpen = await runBridgeAction({
-      action: 'open-web',
-      payload: { sessionId: ctx.sessionId },
-      env: ctx.env,
-      cwd: ctx.project,
-      openBrowser: (url) => openedUrls.push(url),
-    });
+    // Out-of-range existingUrl port must not throw inside probeLivePanel; spawns a clean server instead.
+    const firstOpen = await bridge('open-web', {
+      sessionId: ctx.sessionId,
+      existingUrl: 'http://127.0.0.1:999999/#token=' + 'a'.repeat(64),
+    }, { openBrowser });
     assert.equal(firstOpen.ok, true);
     assert.equal(firstOpen.reused, false);
     assert.match(firstOpen.url, /^http:\/\/127\.0\.0\.1:\d+\/#token=[a-f0-9]{64}$/);
     assert.equal(openedUrls.length, 1);
     launchedPids.push(firstOpen.pid);
 
-    const reusedOpen = await runBridgeAction({
-      action: 'open-web',
-      payload: { sessionId: ctx.sessionId, existingPid: firstOpen.pid, existingUrl: firstOpen.url },
-      env: ctx.env,
-      cwd: ctx.project,
-      openBrowser: (url) => openedUrls.push(url),
-    });
+    const reusedOpen = await bridge('open-web', {
+      sessionId: ctx.sessionId,
+      existingPid: firstOpen.pid,
+      existingUrl: firstOpen.url,
+    }, { openBrowser });
     assert.equal(reusedOpen.ok, true);
     assert.equal(reusedOpen.reused, true);
     assert.equal(reusedOpen.url, firstOpen.url);
@@ -419,13 +408,11 @@ test('pane-bridge handles unregistered snapshot, env isolation, validation, full
 
     // Kill server and verify open-web detects dead server via HTTP probe instead of trusting stale URL.
     await killAndWait(firstOpen.pid);
-    const afterExit = await runBridgeAction({
-      action: 'open-web',
-      payload: { sessionId: ctx.sessionId, existingPid: firstOpen.pid, existingUrl: firstOpen.url },
-      env: ctx.env,
-      cwd: ctx.project,
-      openBrowser: (url) => openedUrls.push(url),
-    });
+    const afterExit = await bridge('open-web', {
+      sessionId: ctx.sessionId,
+      existingPid: firstOpen.pid,
+      existingUrl: firstOpen.url,
+    }, { openBrowser });
     assert.equal(afterExit.ok, true);
     assert.equal(afterExit.reused, false);
     assert.notEqual(afterExit.url, firstOpen.url);
@@ -433,14 +420,6 @@ test('pane-bridge handles unregistered snapshot, env isolation, validation, full
   } finally {
     for (const pid of launchedPids) await killAndWait(pid);
   }
-
-  const badOp = await runBridgeAction({
-    action: 'pool',
-    payload: { sessionId: ctx.sessionId, op: 'unknown-op', data: {} },
-    env: ctx.env,
-    cwd: ctx.project,
-  });
-  assert.equal(badOp.ok, false);
 });
 
 test('Claude Mod pane handles desktop auto-open, quick-add, edit/cancel/empty guard, final countdown tick, AbovePrompt, and session switch', async (t) => {
@@ -469,8 +448,7 @@ test('Claude Mod pane handles desktop auto-open, quick-add, edit/cancel/empty gu
   const quickRes = await host.dispatch('command.run', { command: 'fons', args: '导出接口补 created_at' });
   assert.match(quickRes.text, /已加入 Fons 灵感池/);
 
-  const tree = await host.dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface: 'desktop', props: {} });
-  const nodes = collectNodes(tree);
+  const tree = await host.renderPane();
   const allText = renderText(tree);
   assert.match(allText, /导出接口补 created_at/);
   assert.match(allText, /蓄水 1/);
@@ -483,36 +461,33 @@ test('Claude Mod pane handles desktop auto-open, quick-add, edit/cancel/empty gu
   host.advanceTime(2500);
   tickEntry.fn();
   await host.waitUntil(() => host.invalidations > invBeforeZero);
-  const readyTree = await host.dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface: 'desktop', props: {} });
+  const readyTree = await host.renderPane();
   assert.match(renderText(readyTree), /就绪/);
 
   // Inline Edit: empty submit rejected, cancel releases hold, valid edit updates text.
-  const editBtn = collectNodes(readyTree).find((n) => n.type === 'Button' && n.props.label === '编辑');
+  const editBtn = findNode(readyTree, (n) => n.type === 'Button' && n.props.label === '编辑');
   assert.ok(editBtn);
   await editBtn.props.onPress();
 
-  const editTree = await host.dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface: 'desktop', props: {} });
-  const editNodes = collectNodes(editTree);
-  const editInput = editNodes.find((n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-'));
+  const editTree = await host.renderPane();
+  const editInput = findNode(editTree, (n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-'));
   assert.ok(editInput);
   await editInput.props.onSubmit('   ');
   assert.ok(host.toasts.some((msg) => msg.includes('不能为空')));
 
-  const cancelBtn = editNodes.find((n) => n.type === 'Button' && n.props.key === 'cancel-edit');
+  const cancelBtn = findNode(editTree, (n) => n.type === 'Button' && n.props.key === 'cancel-edit');
   assert.ok(cancelBtn);
   await cancelBtn.props.onPress();
-  const afterCancelTree = await host.dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface: 'desktop', props: {} });
-  assert.equal(collectNodes(afterCancelTree).some((n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-')), false);
+  const afterCancelTree = await host.renderPane();
+  assert.equal(Boolean(findNode(afterCancelTree, (n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-'))), false);
   assert.doesNotMatch(renderText(afterCancelTree), /编辑暂缓/);
 
   // Re-enter edit and submit updated text.
-  const editBtn2 = collectNodes(afterCancelTree).find((n) => n.type === 'Button' && n.props.label === '编辑');
-  await editBtn2.props.onPress();
-  const editTree2 = await host.dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface: 'desktop', props: {} });
-  const editInput2 = collectNodes(editTree2).find((n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-'));
-  await editInput2.props.onSubmit('导出接口补 created_at 与 updated_at');
+  await findNode(afterCancelTree, (n) => n.type === 'Button' && n.props.label === '编辑').props.onPress();
+  const editTree2 = await host.renderPane();
+  await findNode(editTree2, (n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-')).props.onSubmit('导出接口补 created_at 与 updated_at');
 
-  const afterEditTree = await host.dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface: 'desktop', props: {} });
+  const afterEditTree = await host.renderPane();
   assert.match(renderText(afterEditTree), /updated_at/);
 
   // AbovePrompt stays silent while pane is open, and renders safely without nesting { type: 'engine' } when closed.
@@ -524,9 +499,8 @@ test('Claude Mod pane handles desktop auto-open, quick-add, edit/cancel/empty gu
   assert.equal(host.openPanes.has('fons-pool'), false);
 
   const closedBand = await host.dispatch('ui.render', { component: 'AbovePrompt', surface: 'desktop', props: {} }, () => ({ type: 'engine' }));
-  const bandNodes = collectNodes(closedBand);
-  assert.equal(bandNodes.some((n) => n.type === 'engine'), false);
-  const reopenBtn = bandNodes.find((n) => n.type === 'Button' && n.props.key === 'open-fons-pane');
+  assert.equal(collectNodes(closedBand).some((n) => n.type === 'engine'), false);
+  const reopenBtn = findNode(closedBand, (n) => n.type === 'Button' && n.props.key === 'open-fons-pane');
   assert.ok(reopenBtn);
   await reopenBtn.props.onPress();
   assert.equal(host.openPanes.has('fons-pool'), true);
@@ -541,33 +515,114 @@ test('Claude Mod pane handles desktop auto-open, quick-add, edit/cancel/empty gu
   const invBeforeSwitch = host.invalidations;
   pollEntry.fn();
   await host.waitUntil(() => host.invalidations > invBeforeSwitch + 1);
-  const switchedTree = await host.dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface: 'desktop', props: {} });
-  const switchedText = renderText(switchedTree);
+  const switchedText = renderText(await host.renderPane());
   assert.doesNotMatch(switchedText, /updated_at/);
   assert.match(switchedText, /灵感池为空/);
 
-  // Session switch first observed inside /fons <text> (without prior session.append) keeps the new snapshot.
+  // Session switch first observed inside /fons <text> keeps the new snapshot.
   const thirdSessionId = '77777777-7777-4777-8777-777777777707';
   registerSession(ctx, thirdSessionId);
   host.setSessionId(thirdSessionId);
   const directAdd = await host.dispatch('command.run', { command: 'fons', args: '第三会话直接速记' });
   assert.match(directAdd.text, /已加入 Fons 灵感池/);
-  const thirdTree = await host.dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface: 'desktop', props: {} });
+  const thirdTree = await host.renderPane();
   assert.match(renderText(thirdTree), /第三会话直接速记/);
 
-  // Session switch first observed inside refreshSnapshot (↻ button, without prior session.append) keeps the new snapshot.
+  // Session switch first observed inside refreshSnapshot (↻ button) keeps the new snapshot.
   const fourthSessionId = '88888888-8888-4888-8888-888888888808';
   registerSession(ctx, fourthSessionId);
   host.setSessionId(fourthSessionId);
-  const refreshBtn = collectNodes(thirdTree).find((n) => n.type === 'Button' && n.props.key === 'refresh');
+  const refreshBtn = findNode(thirdTree, (n) => n.type === 'Button' && n.props.key === 'refresh');
   assert.ok(refreshBtn);
   await refreshBtn.props.onPress();
-  const fourthTree = await host.dispatch('ui.render', { component: 'Pane', requestId: 'fons-pool', surface: 'desktop', props: {} });
-  const fourthText = renderText(fourthTree);
+  const fourthText = renderText(await host.renderPane());
   assert.match(fourthText, /灵感池为空/);
   assert.doesNotMatch(fourthText, /第三会话直接速记/);
+});
 
-  for (const timer of host.timers) timer.cancel();
+test('Claude Mod pane handles settings UI, ui.close edit release, and open-web bridge failures/session switches', async (t) => {
+  const ctx = setupEnv(t);
+  prepareClaudePlugin({ env: ctx.env, cwd: ctx.project });
+  registerSession(ctx);
+
+  let openWebHook = null;
+  const host = createFakeHost({
+    env: ctx.env,
+    sessionId: ctx.sessionId,
+    cwd: ctx.project,
+    surfaces: ['desktop'],
+    runProcess: async (argv, init, fallback) => {
+      if (argv[2] === 'open-web' && openWebHook) return openWebHook(argv, init);
+      return fallback(argv, init);
+    },
+  });
+  register(host.on, { openAtStart: 'off' });
+  await host.dispatch('session.start', { surface: 'desktop' });
+  await host.dispatch('command.run', { command: 'fons', args: 'open' });
+
+  // Open settings panel, update debounce preset, and verify config persists.
+  const initialTree = await host.renderPane();
+  await findNode(initialTree, (n) => n.type === 'Button' && n.props.key === 'settings').props.onPress();
+  const settingsTree = await host.renderPane();
+  assert.match(renderText(settingsTree), /灵感池设置/);
+  await findNode(settingsTree, (n) => n.type === 'Button' && n.props.key === 'db-30').props.onPress();
+  const afterPreset = await host.renderPane();
+  assert.equal(findNode(afterPreset, (n) => n.type === 'Button' && n.props.key === 'db-30').props.label, '30s ●');
+
+  // Host ui.close cancels active edit, cancels hold renew timer, and releases editingHold.
+  await host.dispatch('command.run', { command: 'fons', args: '待关闭释放的条目' });
+  const withItemTree = await host.renderPane();
+  await findNode(withItemTree, (n) => n.type === 'Button' && n.props.label === '编辑').props.onPress();
+  const holdTimer = host.timers.find((entry) => entry.ms === 10_000 && !entry.once);
+  assert.ok(holdTimer);
+  assert.equal(holdTimer.cancelled, false);
+
+  const invBeforeClose = host.invalidations;
+  await host.dispatch('ui.close', { requestId: 'fons-pool' });
+  await host.waitUntil(() => host.invalidations > invBeforeClose + 1);
+  assert.equal(holdTimer.cancelled, true);
+
+  const snapAfterClose = await runBridgeAction({
+    action: 'snapshot',
+    payload: { sessionId: ctx.sessionId },
+    env: ctx.env,
+    cwd: ctx.project,
+  });
+  assert.equal(snapAfterClose.items[0].editingHold, false);
+
+  // Bridge rejection during /fons web is caught cleanly without unhandled rejection.
+  openWebHook = async () => { throw new Error('spawn failed'); };
+  const failedWeb = await host.dispatch('command.run', { command: 'fons', args: 'web' });
+  assert.equal(failedWeb.text, 'spawn failed');
+  assert.ok(host.toasts.includes('spawn failed'));
+
+  // Session switch mid open-web must not cache the previous session's panel URL onto the new session.
+  const secondSessionId = '99999999-9999-4999-8999-999999999909';
+  registerSession(ctx, secondSessionId);
+  const seenOpenWebInputs = [];
+  openWebHook = async (_argv, init) => {
+    const input = JSON.parse(init.env.FONS_BRIDGE_INPUT);
+    seenOpenWebInputs.push(input);
+    if (seenOpenWebInputs.length === 1) {
+      host.setSessionId(secondSessionId);
+      await host.dispatch('command.run', { command: 'fons', args: '新会话条目' });
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ ok: true, pid: 12345, url: 'http://127.0.0.1:43210/#token=' + 'b'.repeat(64), reused: false }),
+        stderr: '',
+      };
+    }
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({ ok: true, pid: 12346, url: 'http://127.0.0.1:43211/#token=' + 'c'.repeat(64), reused: false }),
+      stderr: '',
+    };
+  };
+  await host.dispatch('command.run', { command: 'fons', args: 'web' });
+  await host.dispatch('command.run', { command: 'fons', args: 'web' });
+  assert.equal(seenOpenWebInputs[0].sessionId, ctx.sessionId);
+  assert.equal(seenOpenWebInputs[1].sessionId, secondSessionId);
+  assert.equal(seenOpenWebInputs[1].existingUrl, undefined);
 });
 
 test('Claude Mod pane respects openAtStart off, non-desktop surfaces, and inline placement auto-close', async (t) => {
@@ -584,7 +639,6 @@ test('Claude Mod pane respects openAtStart off, non-desktop surfaces, and inline
   await desktopOff.waitUntil(() => desktopOff.invalidations >= 1);
   await flushAsync();
   assert.equal(desktopOff.openPanes.has('fons-pool'), false);
-  for (const timer of desktopOff.timers) timer.cancel();
 
   // Desktop early startup where surfaces() has not attached yet ([]) still auto-opens without passing focus: false.
   const earlyDesktop = createFakeHost({ env: ctx.env, sessionId: ctx.sessionId, cwd: ctx.project, surfaces: [] });
@@ -593,7 +647,6 @@ test('Claude Mod pane respects openAtStart off, non-desktop surfaces, and inline
   earlyDesktop.timers.find((entry) => entry.once && entry.ms === 0)?.fn();
   await earlyDesktop.waitUntil(() => earlyDesktop.openPanes.has('fons-pool'));
   assert.equal(earlyDesktop.openPanes.get('fons-pool').focus, undefined);
-  for (const timer of earlyDesktop.timers) timer.cancel();
 
   // Terminal surface does not auto-open on start, and non-manual inline render closes an open pane cleanly.
   const terminalHost = createFakeHost({ env: ctx.env, sessionId: ctx.sessionId, cwd: ctx.project, surfaces: ['terminal'] });
@@ -605,11 +658,8 @@ test('Claude Mod pane respects openAtStart off, non-desktop surfaces, and inline
   assert.equal(terminalHost.openPanes.has('fons-pool'), false);
 
   terminalHost.openPanes.set('fons-pool', { id: 'fons-pool' });
-  const inlineTree = await terminalHost.dispatch('ui.render', {
-    component: 'Pane', requestId: 'fons-pool', surface: 'terminal', props: { placement: 'inline' },
-  });
+  const inlineTree = await terminalHost.renderPane('terminal', { placement: 'inline' });
   await terminalHost.waitUntil(() => !terminalHost.openPanes.has('fons-pool'));
   assert.equal(terminalHost.openPanes.has('fons-pool'), false);
   assert.equal(renderText(inlineTree), '');
-  for (const timer of terminalHost.timers) timer.cancel();
 });

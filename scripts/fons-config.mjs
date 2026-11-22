@@ -25,14 +25,21 @@ export function canonicalPath(dir) {
   }
 }
 
-export function workspacePathKey(dir) {
-  const normalized = canonicalPath(dir);
+function toPathKey(normalized) {
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
-export function isSameOrSubpath(parentDir, childDir) {
-  const rel = path.relative(workspacePathKey(parentDir), workspacePathKey(childDir));
+export function workspacePathKey(dir) {
+  return toPathKey(canonicalPath(dir));
+}
+
+function isSameOrSubpathKey(parentKey, childKey) {
+  const rel = path.relative(parentKey, childKey);
   return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
+}
+
+export function isSameOrSubpath(parentDir, childDir) {
+  return isSameOrSubpathKey(workspacePathKey(parentDir), workspacePathKey(childDir));
 }
 
 function configPath(appData) {
@@ -50,7 +57,7 @@ function defaultConfig() {
 }
 
 function isValidAbsolutePath(value) {
-  return typeof value === 'string' && value.trim().length > 0 && !value.includes('\0') && path.isAbsolute(value.trim());
+  return typeof value === 'string' && !value.includes('\0') && path.isAbsolute(value.trim());
 }
 
 function normalizeWorkspaceList(raw, blockedKeys = new Set()) {
@@ -60,7 +67,7 @@ function normalizeWorkspaceList(raw, blockedKeys = new Set()) {
   for (const item of raw) {
     if (!isValidAbsolutePath(item)) continue;
     const normalized = canonicalPath(item.trim());
-    const key = workspacePathKey(normalized);
+    const key = toPathKey(normalized);
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(normalized);
@@ -77,7 +84,7 @@ function normalizeDebounceSec(value) {
 function normalizeConfig(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return defaultConfig();
   const disabledWorkspaces = normalizeWorkspaceList(raw.disabledWorkspaces);
-  const disabledKeys = new Set(disabledWorkspaces.map(workspacePathKey));
+  const disabledKeys = new Set(disabledWorkspaces.map(toPathKey));
   return {
     debounceSec: normalizeDebounceSec(raw.debounceSec),
     stopWaitDebounce: raw.stopWaitDebounce === true,
@@ -110,7 +117,7 @@ function writeConfigAtomic(filePath, config) {
     fs.writeFileSync(temp, JSON.stringify(config, null, 2) + '\n', 'utf8');
     fs.renameSync(temp, filePath);
   } finally {
-    if (fs.existsSync(temp)) fs.unlinkSync(temp);
+    fs.rmSync(temp, { force: true });
   }
 }
 
@@ -120,42 +127,46 @@ export function readFonsConfig(appData) {
 }
 
 function removeWorkspaceKey(list, key) {
-  return list.filter((entry) => workspacePathKey(entry) !== key);
+  return list.filter((entry) => toPathKey(entry) !== key);
 }
 
 function applyWorkspaceAction(config, action) {
   const normalized = canonicalPath(action.path.trim());
-  const key = workspacePathKey(normalized);
+  const key = toPathKey(normalized);
   let enabled = removeWorkspaceKey(config.enabledWorkspaces, key);
   let disabled = removeWorkspaceKey(config.disabledWorkspaces, key);
-  if (action.mode === 'enable' && (!config.autoAttachWorkspaces || longestMatchingPrefix(disabled, normalized) >= 0)) {
+  if (action.mode === 'enable' && (!config.autoAttachWorkspaces || longestMatchingPrefix(disabled, key) >= 0)) {
     enabled = [...enabled, normalized];
-  } else if (action.mode === 'disable' && (config.autoAttachWorkspaces || action.localPlugin || longestMatchingPrefix(enabled, normalized) >= 0)) {
+  } else if (action.mode === 'disable' && (config.autoAttachWorkspaces || action.localPlugin || longestMatchingPrefix(enabled, key) >= 0)) {
     disabled = [...disabled, normalized];
   }
   return { ...config, enabledWorkspaces: enabled, disabledWorkspaces: disabled };
 }
 
+function invalidConfig(message) {
+  return Object.assign(new Error(message), { code: 'FONS_INVALID_CONFIG' });
+}
+
 function validatePatch(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
-    throw Object.assign(new Error('无效的设置参数。'), { code: 'FONS_INVALID_CONFIG' });
+    throw invalidConfig('无效的设置参数。');
   }
   if (patch.debounceSec !== undefined) {
     const value = patch.debounceSec;
     if (typeof value !== 'number' || !Number.isInteger(value) || value < MIN_DEBOUNCE_SEC || value > MAX_DEBOUNCE_SEC) {
-      throw Object.assign(new Error(`蓄水时长必须为 ${MIN_DEBOUNCE_SEC} 到 ${MAX_DEBOUNCE_SEC} 之间的整数秒。`), { code: 'FONS_INVALID_CONFIG' });
+      throw invalidConfig(`蓄水时长必须为 ${MIN_DEBOUNCE_SEC} 到 ${MAX_DEBOUNCE_SEC} 之间的整数秒。`);
     }
   }
   if (patch.stopWaitDebounce !== undefined && typeof patch.stopWaitDebounce !== 'boolean') {
-    throw Object.assign(new Error('无效参数：stopWaitDebounce'), { code: 'FONS_INVALID_CONFIG' });
+    throw invalidConfig('无效参数：stopWaitDebounce');
   }
   if (patch.autoAttachWorkspaces !== undefined && typeof patch.autoAttachWorkspaces !== 'boolean') {
-    throw Object.assign(new Error('无效参数：autoAttachWorkspaces'), { code: 'FONS_INVALID_CONFIG' });
+    throw invalidConfig('无效参数：autoAttachWorkspaces');
   }
   if (patch.workspaceAction !== undefined) {
     const action = patch.workspaceAction;
     if (!action || typeof action !== 'object' || !isValidAbsolutePath(action.path) || !['enable', 'disable', 'reset'].includes(action.mode)) {
-      throw Object.assign(new Error('无效的工作区挂载操作。'), { code: 'FONS_INVALID_CONFIG' });
+      throw invalidConfig('无效的工作区挂载操作。');
     }
   }
 }
@@ -168,58 +179,63 @@ export function updateFonsConfig(appData, patch) {
   if (patch.stopWaitDebounce !== undefined) next = { ...next, stopWaitDebounce: patch.stopWaitDebounce };
   if (patch.autoAttachWorkspaces !== undefined) next = { ...next, autoAttachWorkspaces: patch.autoAttachWorkspaces };
   if (patch.workspaceAction !== undefined) next = applyWorkspaceAction(next, patch.workspaceAction);
-  next = normalizeConfig(next);
   writeConfigAtomic(configPath(appData), next);
   return next;
 }
 
-export function hasEnvDebounceOverride(env = process.env) {
+function parseEnvDebounceSec(env) {
   const raw = env?.FONS_DEBOUNCE_SEC;
-  if (raw === undefined || String(raw).trim() === '') return false;
+  if (raw === undefined || String(raw).trim() === '') return null;
   const seconds = Number(raw);
-  return Number.isFinite(seconds) && seconds >= 0;
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
+function parseEnvStopWait(env) {
+  if (env?.FONS_STOP_WAIT_DEBOUNCE === '1') return true;
+  if (env?.FONS_STOP_WAIT_DEBOUNCE === '0') return false;
+  return null;
+}
+
+export function hasEnvDebounceOverride(env = process.env) {
+  return parseEnvDebounceSec(env) !== null;
 }
 
 export function hasEnvStopWaitOverride(env = process.env) {
-  return env?.FONS_STOP_WAIT_DEBOUNCE === '1' || env?.FONS_STOP_WAIT_DEBOUNCE === '0';
+  return parseEnvStopWait(env) !== null;
 }
 
 export function resolveConfiguredDebounceMs({ appData = null, env = process.env } = {}) {
-  const raw = env?.FONS_DEBOUNCE_SEC;
-  if (raw !== undefined && String(raw).trim() !== '') {
-    const seconds = Number(raw);
-    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-  }
-  return readFonsConfig(appData).debounceSec * 1000;
+  return (parseEnvDebounceSec(env) ?? readFonsConfig(appData).debounceSec) * 1000;
 }
 
 export function resolveStopWaitDebounce({ appData = null, env = process.env } = {}) {
-  if (env?.FONS_STOP_WAIT_DEBOUNCE === '1') return true;
-  if (env?.FONS_STOP_WAIT_DEBOUNCE === '0') return false;
-  return readFonsConfig(appData).stopWaitDebounce;
+  return parseEnvStopWait(env) ?? readFonsConfig(appData).stopWaitDebounce;
 }
 
-function longestMatchingPrefix(workspaces, rootDir) {
+function longestMatchingPrefix(workspaces, rootKey) {
   let best = -1;
   for (const entry of workspaces) {
-    if (isSameOrSubpath(entry, rootDir)) {
-      best = Math.max(best, workspacePathKey(entry).length);
+    const entryKey = workspacePathKey(entry);
+    if (isSameOrSubpathKey(entryKey, rootKey)) {
+      best = Math.max(best, entryKey.length);
     }
   }
   return best;
 }
 
-export function workspaceConfigState({ appData, rootDir, config = readFonsConfig(appData), localPlugin = false }) {
+export function workspaceConfigState({ appData, rootDir, config, localPlugin = false }) {
   if (!rootDir) return { enabled: true, explicitState: 'default' };
-  const disabledLen = longestMatchingPrefix(config.disabledWorkspaces, rootDir);
-  const enabledLen = longestMatchingPrefix(config.enabledWorkspaces, rootDir);
+  const resolvedConfig = config ?? readFonsConfig(appData);
+  const rootKey = workspacePathKey(rootDir);
+  const disabledLen = longestMatchingPrefix(resolvedConfig.disabledWorkspaces, rootKey);
+  const enabledLen = longestMatchingPrefix(resolvedConfig.enabledWorkspaces, rootKey);
   if (disabledLen >= 0 && disabledLen >= enabledLen) {
     return { enabled: false, explicitState: 'disabled' };
   }
   if (enabledLen >= 0) {
     return { enabled: true, explicitState: 'enabled' };
   }
-  return { enabled: config.autoAttachWorkspaces || Boolean(localPlugin), explicitState: 'default' };
+  return { enabled: resolvedConfig.autoAttachWorkspaces || Boolean(localPlugin), explicitState: 'default' };
 }
 
 export function isWorkspaceEnabled(options) {
@@ -235,7 +251,8 @@ function isExcludedName(exclude, names) {
 function entryMountsRepo(rootDir, entry, repoRoot, repoKey) {
   if (!entry || entry.enabled === false || typeof entry.path !== 'string' || !entry.path.trim()) return false;
   const base = path.resolve(rootDir, entry.path);
-  if (workspacePathKey(base) === repoKey) return true;
+  const baseKey = workspacePathKey(base);
+  if (baseKey === repoKey) return true;
   const repoName = path.basename(repoRoot);
   if (isExcludedName(entry.exclude, [repoName, 'fons'])) return false;
   if (Array.isArray(entry.include_only)) {
@@ -243,7 +260,7 @@ function entryMountsRepo(rootDir, entry, repoRoot, repoKey) {
       typeof name === 'string' && name.trim() && workspacePathKey(path.join(base, name)) === repoKey
     );
   }
-  if (workspacePathKey(path.dirname(repoRoot)) === workspacePathKey(base)) return true;
+  if (workspacePathKey(path.dirname(repoRoot)) === baseKey) return true;
   return fs.existsSync(path.join(base, 'fons', 'hooks.json'));
 }
 
@@ -254,6 +271,6 @@ export function hasLocalWorkspaceFonsPlugin(rootDir, repoRoot) {
   const manifest = readRawJson(path.join(resolvedRoot, '.agents', 'plugins.json'));
   if (!repoRoot || !Array.isArray(manifest?.entries)) return false;
   const resolvedRepo = canonicalPath(repoRoot);
-  const repoKey = workspacePathKey(resolvedRepo);
+  const repoKey = toPathKey(resolvedRepo);
   return manifest.entries.some((entry) => entryMountsRepo(resolvedRoot, entry, resolvedRepo, repoKey));
 }

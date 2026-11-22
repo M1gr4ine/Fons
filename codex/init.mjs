@@ -1,7 +1,7 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { codexAppData } from '../adapters/codex.mjs';
+import { absolutePath, ancestorDirs, effectiveHome } from '../adapters/shared.mjs';
 import {
   assertNoDirectFonsHooks, packageFiles, packageVersion, publishPackage, readOptionalJson,
 } from '../scripts/fons-package.mjs';
@@ -27,16 +27,16 @@ const PLUGIN_FILES = [
   'scripts/fons-engine.mjs',
   'scripts/fons-hook.mjs',
   'scripts/fons-inbox.mjs',
-  'scripts/fons-package.mjs',
   'scripts/fons-store.mjs',
   'sidecars/fons-pool/index.html',
   'sidecars/fons-pool/main.mjs',
 ];
 
-function checkExistingHooks(codexHome, cwd, rootOverride) {
+function checkExistingHooks({ codexHome, cwd, env, homeDir }) {
   const files = new Set([path.join(codexHome, 'hooks.json')]);
+  const rootOverride = env.FONS_ROOT?.trim();
   if (rootOverride) files.add(path.resolve(cwd, rootOverride, '.codex', 'hooks.json'));
-  for (let dir = path.resolve(cwd); dir !== path.dirname(dir); dir = path.dirname(dir)) {
+  for (const dir of ancestorDirs(absolutePath(cwd) ?? path.resolve(cwd), homeDir)) {
     files.add(path.join(dir, '.codex', 'hooks.json'));
   }
   assertNoDirectFonsHooks(files);
@@ -64,14 +64,13 @@ function publishMarketplace(file, sourcePath) {
   };
   catalog.plugins = catalog.plugins.filter((entry) => entry?.name !== 'fons');
   catalog.plugins.push(plugin);
-
-  fs.mkdirSync(path.dirname(file), { recursive: true });
   writeJsonAtomic(file, catalog);
 }
 
-export function prepareCodexPlugin({ env = process.env, cwd = process.cwd() } = {}) {
-  const codexHome = codexAppData(env, undefined, cwd);
-  checkExistingHooks(codexHome, cwd, env.FONS_ROOT?.trim());
+export function prepareCodexPlugin({ env = process.env, cwd = process.cwd(), homeDir } = {}) {
+  const resolvedHome = homeDir || effectiveHome(env);
+  const codexHome = codexAppData(env, resolvedHome, cwd);
+  checkExistingHooks({ codexHome, cwd, env, homeDir: resolvedHome });
 
   const marketplaceRoot = path.join(codexHome, 'fons', 'plugin-marketplace');
   const marketplaceFile = path.join(marketplaceRoot, '.agents', 'plugins', 'marketplace.json');

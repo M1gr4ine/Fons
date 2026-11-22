@@ -2,17 +2,20 @@ import crypto from 'node:crypto';
 
 export const COMPLETED_PREFIX = '【√】 ';
 const COMPLETED_LINE_RE = /^\s*(?:(?:[-*]\s*)?(?:\[\s*[√✓✔]\s*\]|【\s*[√✓✔]\s*】|[√✓✔])|[-*]\s*\[\s*[xX]\s*\])/;
+const COMPLETED_PREFIX_RE = new RegExp(COMPLETED_LINE_RE.source + '\\s*');
 const RECEIPT_RE = /^【√】 (.*?) <!-- fons-ack:([0-9]+-[a-f0-9]{64}) -->$/;
-const UUID_PART = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+export const UUID_PART = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const STORED_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}-[a-f0-9]{8}(?:\.[a-z0-9]{1,16})?$/;
-const TAIL_ATTACHMENT_RE = new RegExp(
-  `(?:^|\\s+)\\[([^\\[\\]\\r\\n]+)\\]\\((attachments\\/(${UUID_PART})\\/([A-Za-z0-9._-]+))\\)$`,
-  'i',
-);
-const TAIL_ARCHIVED_ATTACHMENT_RE = new RegExp(
-  `(?:^|\\s+)\\[([^\\[\\]\\r\\n]+)\\]\\(\\.\\.\\/(attachments\\/(${UUID_PART})\\/([A-Za-z0-9._-]+))\\)$`,
-  'i',
-);
+
+function tailAttachmentPattern(prefix = '') {
+  return new RegExp(
+    `(?:^|\\s+)\\[([^\\[\\]\\r\\n]+)\\]\\(${prefix}(attachments\\/(${UUID_PART})\\/([A-Za-z0-9._-]+))\\)$`,
+    'i',
+  );
+}
+
+const TAIL_ATTACHMENT_RE = tailAttachmentPattern();
+const TAIL_ARCHIVED_ATTACHMENT_RE = tailAttachmentPattern('\\.\\.\\/');
 
 export function isValidStoredName(value) {
   return typeof value === 'string' && !value.includes('..') && STORED_NAME_RE.test(value);
@@ -32,14 +35,13 @@ export function cleanAttachmentLabel(name, fallback = 'attachment') {
 }
 
 export function composeIdeaText(note, attachments = [], sessionId) {
-  const cleanNote = String(note ?? '').replace(/[\r\n]+/g, ' ').trim();
+  const cleanNote = note.trim();
   const seen = new Set();
   const links = [];
-  for (const item of attachments) {
-    if (!item || !isValidStoredName(item.storedName) || seen.has(item.storedName)) continue;
-    seen.add(item.storedName);
-    const label = cleanAttachmentLabel(item.name, item.storedName);
-    links.push(`[${label}](attachments/${sessionId}/${item.storedName})`);
+  for (const { name, storedName } of attachments) {
+    if (seen.has(storedName)) continue;
+    seen.add(storedName);
+    links.push(`[${cleanAttachmentLabel(name, storedName)}](attachments/${sessionId}/${storedName})`);
   }
   if (cleanNote && links.length) return `${cleanNote} ${links.join(' ')}`;
   return cleanNote || links.join(' ');
@@ -52,42 +54,46 @@ export function formatArchivedIdeaText(text, sessionId) {
   return note ? `${note} ${links.join(' ')}` : links.join(' ');
 }
 
-function normalizeArchivedLinks(text) {
-  let remaining = String(text ?? '').trim();
-  const tailLinks = [];
-  while (remaining) {
-    const match = TAIL_ARCHIVED_ATTACHMENT_RE.exec(remaining);
-    if (!match) break;
-    const [, rawName, normalizedRelPath, , storedName] = match;
-    if (!isValidStoredName(storedName)) break;
-    tailLinks.push(`[${rawName}](${normalizedRelPath})`);
-    remaining = remaining.slice(0, match.index).trimEnd();
-  }
-  if (!tailLinks.length) return remaining;
-  tailLinks.reverse();
-  return remaining ? `${remaining} ${tailLinks.join(' ')}` : tailLinks.join(' ');
+export function formatArchivedInlineRow(body, sessionId) {
+  const extracted = completedText(body);
+  if (!extracted || !splitIdeaText(extracted, sessionId).attachments.length) return body;
+  const prefix = COMPLETED_PREFIX_RE.exec(body)?.[0] ?? COMPLETED_PREFIX;
+  return `${prefix}${formatArchivedIdeaText(extracted, sessionId)}`;
 }
 
-export function splitIdeaText(text, sessionId) {
-  let remaining = String(text ?? '').trim();
-  const parsed = [];
+function extractTailAttachments(text, pattern, sessionId) {
+  let remaining = text;
+  const links = [];
   while (remaining) {
-    const match = TAIL_ATTACHMENT_RE.exec(remaining);
+    const match = pattern.exec(remaining);
     if (!match) break;
     const [, rawName, relPath, linkSessionId, storedName] = match;
     if (!isValidStoredName(storedName)) break;
     if (sessionId && linkSessionId.toLowerCase() !== sessionId.toLowerCase()) break;
-    parsed.push({ name: rawName.trim() || storedName, storedName, relPath });
+    links.push({ rawName, relPath, storedName });
     remaining = remaining.slice(0, match.index).trimEnd();
   }
-  parsed.reverse();
+  links.reverse();
+  return { remaining, links };
+}
+
+function normalizeArchivedLinks(text) {
+  const { remaining, links } = extractTailAttachments(text, TAIL_ARCHIVED_ATTACHMENT_RE);
+  if (!links.length) return remaining;
+  const normalized = links.map(({ rawName, relPath }) => `[${rawName}](${relPath})`).join(' ');
+  return remaining ? `${remaining} ${normalized}` : normalized;
+}
+
+export function splitIdeaText(text, sessionId) {
+  const { remaining, links } = extractTailAttachments(String(text ?? '').trim(), TAIL_ATTACHMENT_RE, sessionId);
   const seen = new Set();
-  const attachments = parsed.filter(({ storedName }) => {
-    if (seen.has(storedName)) return false;
+  const attachments = [];
+  for (const { rawName, relPath, storedName } of links) {
+    if (seen.has(storedName)) continue;
     seen.add(storedName);
-    return true;
-  });
-  return { note: remaining.trim(), attachments };
+    attachments.push({ name: rawName.trim() || storedName, storedName, relPath });
+  }
+  return { note: remaining, attachments };
 }
 
 export function formatRetractedIdea(text, sessionId) {
@@ -190,14 +196,14 @@ export function deliveryIdAfterRemovingCompletion(text, rows, archive) {
   return deliveryId(text, countCompletions(rows, archive).get(text) - 1);
 }
 
-export function parseActiveItems(content, archivedContent = '') {
-  const { rows, activeItems } = parseInbox(content);
-  if (activeItems.length === 0) return [];
+export function activeDeliveryIds(rows, activeItems, archivedContent = '') {
+  const ids = new Map();
+  if (!activeItems.length) return ids;
 
   const completions = countCompletions(rows, archivedContent);
-  return activeItems.map(({ text }) => {
+  for (const { text } of activeItems) {
     // Keep the delivery ID stable when a completion moves from ideas.md to archive.md.
-    const count = completions.get(text);
-    return { id: deliveryId(text, count), text };
-  });
+    ids.set(text, deliveryId(text, completions.get(text)));
+  }
+  return ids;
 }

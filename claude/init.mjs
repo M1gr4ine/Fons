@@ -1,9 +1,7 @@
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claudeAppData } from '../adapters/claude.mjs';
-import { absolutePath, pathKey } from '../adapters/shared.mjs';
+import { absolutePath, ancestorDirs, asIdentifier, effectiveHome } from '../adapters/shared.mjs';
 import {
   assertNoDirectFonsHooks, packageFiles, packageVersion, publishPackage, readOptionalJson,
 } from '../scripts/fons-package.mjs';
@@ -60,9 +58,7 @@ function checkExistingHooks({ claudeHome, cwd, env, homeDir }) {
   for (const override of [env.FONS_ROOT?.trim(), env.CLAUDE_PROJECT_DIR?.trim()]) {
     if (override) addProjectSettings(files, path.resolve(cwd, override));
   }
-  const home = pathKey(absolutePath(homeDir));
-  for (let dir = absolutePath(cwd) ?? path.resolve(cwd); dir !== path.dirname(dir); dir = path.dirname(dir)) {
-    if (pathKey(dir) === home) break;
+  for (const dir of ancestorDirs(absolutePath(cwd) ?? path.resolve(cwd), homeDir)) {
     addProjectSettings(files, dir);
   }
   assertNoDirectFonsHooks(files);
@@ -79,7 +75,7 @@ function publishMarketplace(file, sourcePath) {
     owner: { name: 'Fons' },
     plugins: [],
   };
-  const ownerValid = typeof catalog.owner?.name === 'string' && Boolean(catalog.owner.name.trim());
+  const ownerValid = Boolean(asIdentifier(catalog.owner?.name));
   if (!ownerValid) catalog.owner = { name: 'Fons' };
   const oldPlugin = catalog.plugins.find((plugin) => plugin?.name === 'fons');
   if (ownerValid && oldPlugin?.source === sourcePath) return;
@@ -92,15 +88,13 @@ function publishMarketplace(file, sourcePath) {
   };
   catalog.plugins = catalog.plugins.filter((entry) => entry?.name !== 'fons');
   catalog.plugins.push(plugin);
-
-  fs.mkdirSync(path.dirname(file), { recursive: true });
   writeJsonAtomic(file, catalog);
 }
 
 export function prepareClaudePlugin({ env = process.env, cwd = process.cwd(), homeDir } = {}) {
-  const effectiveHome = homeDir || env.USERPROFILE || env.HOME || os.homedir();
-  const claudeHome = claudeAppData(env, effectiveHome, cwd);
-  checkExistingHooks({ claudeHome, cwd, env, homeDir: effectiveHome });
+  const resolvedHome = homeDir || effectiveHome(env);
+  const claudeHome = claudeAppData(env, resolvedHome, cwd);
+  checkExistingHooks({ claudeHome, cwd, env, homeDir: resolvedHome });
 
   const marketplaceRoot = path.join(claudeHome, 'fons', 'plugin-marketplace');
   const marketplaceFile = path.join(marketplaceRoot, '.claude-plugin', 'marketplace.json');

@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { isWorkspaceEnabled } from "../scripts/fons-config.mjs";
 import { formatRetractedIdea } from "../scripts/fons-inbox.mjs";
@@ -10,13 +9,12 @@ import {
   markConversationLifecycle, readJson, registerConversation, sessionPaths, withPoolWrite, writeJsonAtomic,
 } from "../scripts/fons-store.mjs";
 import {
-  absolutePath, asIdentifier, findMarkedWorkspace, formatDeliveredLine, matchesScope,
+  START_SOURCES, absolutePath, asIdentifier, findMarkedWorkspace, formatDeliveredLine, hostAppData, matchesScope,
   matchesTranscriptAnchor, pathKey, standardPoolPolicy, withLockFallback,
 } from "./shared.mjs";
 
 const HOST = "claude";
 const HOOK_EVENTS = new Set(["SessionStart", "UserPromptSubmit", "PostToolBatch", "Stop", "SessionEnd"]);
-const START_SOURCES = new Set(["startup", "resume", "clear", "compact", "fork"]);
 const MARKERS = [".agents", ".claude", ".git"];
 const MAX_CONTEXT_CHARS = 10_000;
 const TOKEN_PLACEHOLDER = "00000000";
@@ -30,12 +28,11 @@ const LINE_FORMAT_OPTIONS = {
   noWorkspaceHint: "；该附件位于无工作区目录",
 };
 
-export function claudeAppData(env = process.env, homeDir = os.homedir(), cwd = process.cwd()) {
-  const configured = env.CLAUDE_CONFIG_DIR?.trim();
-  return configured ? path.resolve(cwd, configured) : path.resolve(homeDir, ".claude");
+export function claudeAppData(env = process.env, homeDir, cwd = process.cwd()) {
+  return hostAppData("CLAUDE_CONFIG_DIR", ".claude", env, homeDir, cwd);
 }
 
-export function findClaudeWorkspace(cwd, homeDir = os.homedir()) {
+export function findClaudeWorkspace(cwd, homeDir) {
   return findMarkedWorkspace(cwd, MARKERS, homeDir);
 }
 
@@ -147,7 +144,7 @@ function formatMessages(result, paths, { scope, sessionId }) {
   if (result.retractions.length) {
     const header = RETRACTION_HEADER + "\n";
     const text = result.retractions.map((item) => formatRetractedIdea(item, sessionId)).join("\n");
-    const section = header + clampText(text, Math.max(0, remaining - header.length));
+    const section = header + clampText(text, remaining - header.length);
     sections.push(section);
     remaining -= section.length;
   }

@@ -3,24 +3,42 @@ import os from "node:os";
 import path from "node:path";
 import { canonicalPath, resolveStopWaitDebounce } from "../scripts/fons-config.mjs";
 
+export const START_SOURCES = new Set(["startup", "resume", "clear", "compact", "fork"]);
+export const UNREADABLE_LOG = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM", "EISDIR"]);
+
+export function effectiveHome(env = process.env) {
+  return env.USERPROFILE || env.HOME || os.homedir();
+}
+
+export function hostAppData(envKey, defaultDir, env = process.env, homeDir = effectiveHome(env), cwd = process.cwd()) {
+  const configured = env[envKey]?.trim();
+  return configured ? path.resolve(cwd, configured) : path.resolve(homeDir, defaultDir);
+}
+
 export function absolutePath(value) {
   if (typeof value !== "string" || value.includes("\0") || !path.isAbsolute(value)) return null;
   return canonicalPath(value);
 }
 
 export function pathKey(value) {
-  if (process.platform === "win32") return value?.toLowerCase() ?? null;
-  return value;
+  if (value == null) return null;
+  return process.platform === "win32" ? value.toLowerCase() : value;
 }
 
-export function findMarkedWorkspace(cwd, markers, homeDir = os.homedir()) {
+export function* ancestorDirs(startDir, homeDir = effectiveHome()) {
   const home = pathKey(absolutePath(homeDir));
-  let directory = absolutePath(cwd);
+  let directory = startDir;
   while (directory) {
     const parent = path.dirname(directory);
     if (directory === parent || pathKey(directory) === home) break;
-    if (markers.some((marker) => fs.existsSync(path.join(directory, marker)))) return directory;
+    yield directory;
     directory = parent;
+  }
+}
+
+export function findMarkedWorkspace(cwd, markers, homeDir = effectiveHome()) {
+  for (const directory of ancestorDirs(absolutePath(cwd), homeDir)) {
+    if (markers.some((marker) => fs.existsSync(path.join(directory, marker)))) return directory;
   }
   return null;
 }
@@ -39,9 +57,8 @@ export function asIdentifier(value) {
 }
 
 function quotePath(filename) {
-  const backticks = String.fromCharCode(96);
-  const runs = filename.match(/\x60+/g) ?? [];
-  const delimiter = backticks.repeat(1 + Math.max(0, ...runs.map((run) => run.length)));
+  const runs = filename.match(/`+/g) ?? [];
+  const delimiter = "`".repeat(1 + Math.max(0, ...runs.map((run) => run.length)));
   return delimiter + filename + delimiter;
 }
 
@@ -57,21 +74,20 @@ export function formatDeliveredLine(
   return (note || emptyNote) + suffix + "（附件: " + names.join(", ") + sandbox + "）";
 }
 
-export function standardPoolPolicy({ appData = null, env = process.env } = {}) {
+export function standardPoolPolicy({ appData = null } = {}) {
   return {
     rotateTokenOnStopRetry: false,
-    earlyDeliverBufferingOnStop: !resolveStopWaitDebounce({ appData, env }),
+    earlyDeliverBufferingOnStop: !resolveStopWaitDebounce({ appData }),
     ackHintPolicy: "never",
-    editingHoldPolicy: "always",
   };
 }
 
-export function withLockFallback(run) {
+export function withLockFallback(run, fallback = {}) {
   try {
     return run();
   } catch (error) {
     if (error.code !== "FONS_POOL_LOCK") throw error;
     process.stderr.write("[FONS] 无法取得会话收件箱写入锁，已保留待办。\n");
-    return {};
+    return fallback;
   }
 }

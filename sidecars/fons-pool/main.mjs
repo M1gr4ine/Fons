@@ -38,8 +38,12 @@ function jsonError(status, error) {
   return { status, contentType: 'application/json', body: JSON.stringify({ error }) };
 }
 
+export function isPlainObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function isValidUploadEntry(v) {
-  if (!v || typeof v !== 'object' || Array.isArray(v)) return false;
+  if (!isPlainObject(v)) return false;
   if (typeof v.name !== 'string' || !v.name.trim() || v.name.length > 255) return false;
   if (v.mimeType !== undefined && (typeof v.mimeType !== 'string' || v.mimeType.length > 128)) return false;
   return typeof v.dataBase64 === 'string' && v.dataBase64.length > 0 && v.dataBase64.length <= MAX_UPLOAD_BASE64;
@@ -208,13 +212,19 @@ function bindSession(appData, boundSession, env = process.env) {
   return { sessionId, scope: entry.scope, rootDir: entry.rootDir, fonsDir: entry.fonsDir, appData, env };
 }
 
+function validateBoundRequest(context, data) {
+  if (data.conversationId !== undefined && data.conversationId !== context.sessionId) {
+    return jsonError(403, '当前面板未绑定此会话。');
+  }
+  if (!validWorkspaceUris(data.workspaceUris)) return jsonError(400, '无效参数：workspaceUris');
+  if (hasWorkspaceMismatch(context, data.workspaceUris)) return jsonError(409, '当前会话与工作区状态不匹配。');
+  return null;
+}
+
 function boundHandler(context, action) {
   return (data = {}) => {
-    if (data.conversationId !== undefined && data.conversationId !== context.sessionId) {
-      return jsonError(403, '当前面板未绑定此会话。');
-    }
-    if (!validWorkspaceUris(data.workspaceUris)) return jsonError(400, '无效参数：workspaceUris');
-    if (hasWorkspaceMismatch(context, data.workspaceUris)) return jsonError(409, '当前会话与工作区状态不匹配。');
+    const invalid = validateBoundRequest(context, data);
+    if (invalid) return invalid;
     if (context.scope === 'workspace') {
       const disabled = disabledWorkspaceResponse({
         appData: context.appData, action, rootDir: context.rootDir, detectLocalPlugin: false,
@@ -231,10 +241,6 @@ export function buildCurrentWorkspaceInfo({ appData, config, rootDir, detectLoca
   const localPlugin = detectLocalPlugin ? hasLocalWorkspaceFonsPlugin(normalized, REPO_ROOT) : false;
   const { enabled, explicitState } = workspaceConfigState({ appData, rootDir: normalized, config, localPlugin });
   return { path: normalized, name: path.basename(normalized) || normalized, enabled, localPlugin, explicitState };
-}
-
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function normalizeWorkspaceActionPatch({ action, detectLocalPlugin }) {
@@ -367,11 +373,8 @@ function settingsHandler(appData) {
 
 function boundSettingsHandler(context) {
   return (data = {}) => {
-    if (data.conversationId !== undefined && data.conversationId !== context.sessionId) {
-      return jsonError(403, '当前面板未绑定此会话。');
-    }
-    if (!validWorkspaceUris(data.workspaceUris)) return jsonError(400, '无效参数：workspaceUris');
-    if (hasWorkspaceMismatch(context, data.workspaceUris)) return jsonError(409, '当前会话与工作区状态不匹配。');
+    const invalid = validateBoundRequest(context, data);
+    if (invalid) return invalid;
     let config = readFonsConfig(context.appData);
     if (data.update !== undefined) {
       const updated = applySettingsPatch({ appData: context.appData, update: data.update, detectLocalPlugin: false });
@@ -405,10 +408,7 @@ export function createBoundPoolRoutes(boundSession, { env } = {}) {
   const routes = new Map();
   mountPoolRoutes({
     page() {},
-    api(routePath, handle, method) {
-      if (method !== 'POST') throw new Error('Fons 面板只支持 POST 操作。');
-      routes.set(routePath, handle);
-    },
+    api(routePath, handle) { routes.set(routePath, handle); },
   }, boundSession.appData, { boundSession, env });
   return routes;
 }
@@ -423,7 +423,7 @@ export function renderPoolBridgeHtml(helpers, entrypointCall) {
 
 function isEntryPoint() {
   if (typeof import.meta.main === 'boolean') return import.meta.main;
-  return process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+  return Boolean(process.argv[1]) && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
 }
 
 export async function startSidecar() {

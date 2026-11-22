@@ -1,19 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  hasLocalWorkspaceFonsPlugin, isWorkspaceEnabled, resolveStopWaitDebounce,
-} from "../scripts/fons-config.mjs";
+import { hasLocalWorkspaceFonsPlugin, isWorkspaceEnabled } from "../scripts/fons-config.mjs";
 import { formatRetractedIdea } from "../scripts/fons-inbox.mjs";
 import {
   findAppData, isValidSessionId, noWorkspaceFonsDir, readJson, registerConversation, sessionPaths,
 } from "../scripts/fons-store.mjs";
 import { executePoolEvent, extractAckTokensFromText } from "../scripts/fons-engine.mjs";
+import {
+  UNREADABLE_LOG, asIdentifier, matchesScope, standardPoolPolicy, withLockFallback,
+} from "./shared.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const HOOK_EVENTS = new Set(["PreInvocation", "SessionStart", "Stop"]);
-const UNREADABLE_LOG = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM", "EISDIR"]);
 const NO_WORKSPACE_PRE_HEADER = "[FONS] 完成后末行附 [FONS_ACK: 编号]";
 const STOP_HEADER = "[FONS 收尾核对] 以下补充待处理（完成后在回复末行附 [FONS_ACK: 编号]）：";
 
@@ -26,12 +26,12 @@ function tryParseJson(line) {
 }
 
 function readJsonLines(filePath) {
-  if (!filePath || !fs.existsSync(filePath)) return [];
+  if (!filePath) return [];
   let raw;
   try {
     raw = fs.readFileSync(filePath, "utf8");
   } catch (err) {
-    if (UNREADABLE_LOG.has(err?.code)) return [];
+    if (UNREADABLE_LOG.has(err.code)) return [];
     throw err;
   }
   return raw
@@ -137,16 +137,15 @@ function resolveAppData(input) {
 }
 
 function resolveArtifactDir(input) {
-  return typeof input.artifactDirectoryPath === "string" && input.artifactDirectoryPath.trim()
-    ? path.resolve(input.artifactDirectoryPath)
-    : null;
+  const dir = asIdentifier(input.artifactDirectoryPath);
+  return dir ? path.resolve(dir) : null;
 }
 
 function workspaceHasLocalPlugin(resolvedRoot, workspacePaths) {
   const candidates = [resolvedRoot];
   if (Array.isArray(workspacePaths)) {
     for (const dir of workspacePaths) {
-      if (typeof dir === "string" && dir.trim()) candidates.push(path.resolve(dir));
+      if (asIdentifier(dir)) candidates.push(path.resolve(dir));
     }
   }
   return candidates.some((dir) => hasLocalWorkspaceFonsPlugin(dir, REPO_ROOT));
@@ -155,9 +154,9 @@ function workspaceHasLocalPlugin(resolvedRoot, workspacePaths) {
 function resolveHookContext(input, scopeMode) {
   if (!isValidSessionId(input.conversationId)) return null;
   const artifactDir = resolveArtifactDir(input);
-  const isNoWorkspace = Array.isArray(input.workspacePaths) ? input.workspacePaths.length === 0 : !input.cwd;
+  const isNoWorkspace = Array.isArray(input.workspacePaths) ? input.workspacePaths.length === 0 : !asIdentifier(input.cwd);
   if (isNoWorkspace) {
-    if (scopeMode === "workspace") return null;
+    if (!matchesScope(scopeMode, "no-workspace")) return null;
     const appData = resolveAppData(input);
     if (!appData) return null;
     return {
@@ -170,8 +169,8 @@ function resolveHookContext(input, scopeMode) {
       needsAckHint: true,
     };
   }
-  if (scopeMode === "no-workspace") return null;
-  const rootDir = input.cwd || input.workspacePaths?.[0];
+  if (!matchesScope(scopeMode, "workspace")) return null;
+  const rootDir = asIdentifier(input.cwd) || asIdentifier(input.workspacePaths?.[0]);
   if (!rootDir) return null;
   const resolvedRoot = path.resolve(rootDir);
   const appData = resolveAppData(input);
@@ -212,8 +211,8 @@ function handleSessionEvent(input, context, fallback) {
 
   const request = preparePoolEvent(input, paths);
   const policy = {
+    ...standardPoolPolicy({ appData: context.appData }),
     rotateTokenOnStopRetry: true,
-    earlyDeliverBufferingOnStop: !resolveStopWaitDebounce({ appData: context.appData }),
     ackHintPolicy: context.needsAckHint ? "once" : "never",
   };
   const attachmentPaths = { sourceDir: paths.attachmentsDir, mirrors: new Map() };
@@ -234,5 +233,5 @@ export function evaluateAntigravityHook(input, scopeMode) {
   if (event === "Stop" && (input.terminationReason !== "NO_TOOL_CALL" || input.fullyIdle === false)) return fallback;
   const context = resolveHookContext(input, scopeMode);
   if (!context) return fallback;
-  return handleSessionEvent(input, context, fallback);
+  return withLockFallback(() => handleSessionEvent(input, context, fallback), fallback);
 }

@@ -166,7 +166,7 @@ function canDeliverAtStop(item, timing, policy) {
   return !pending?.editingHold && (policy.earlyDeliverBufferingOnStop || pending?.remainingMs === 0);
 }
 
-function reserveLegacyContinuation({ state, ui }, items, { continuationActive }) {
+function reserveTurnlessContinuation({ state, ui }, items, { continuationActive }) {
   const signature = items.map(({ id }) => {
     const withdrawal = ui.retracted?.[id];
     return withdrawal ? id + "@" + withdrawal.ts : id;
@@ -209,7 +209,7 @@ function reserveContinuation(data, items, pendingRetractions, event) {
     if (!items.length && !pendingRetractions.length) return false;
     return reserveTurnContinuation(data, items, pendingRetractions, event);
   }
-  return items.length > 0 && reserveLegacyContinuation(data, items, event);
+  return items.length > 0 && reserveTurnlessContinuation(data, items, event);
 }
 
 function handleStop(data, event, policy, timing) {
@@ -242,7 +242,7 @@ function applyPoolEvent(data, event, policy, prepareDeliveries) {
   const before = JSON.stringify(data.state);
   if (!claimToolEvent(data.state, event.toolEventKey)) return { kind: "allow" };
   if (event.rememberPromptId) data.state.lastPromptId = event.rememberPromptId;
-  const timing = computeDebounce({ ...data, appData: data.appData, editingHoldPolicy: policy.editingHoldPolicy });
+  const timing = computeDebounce({ ...data, appData: data.appData });
   const result = event.kind === "stop" ? handleStop(data, event, policy, timing) : handleDelivery(data, event, policy, timing);
   // Prepare the selected delivery before publishing it in the ledger.
   if (result.deliveries?.length) prepareDeliveries?.(result.deliveries);

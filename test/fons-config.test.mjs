@@ -146,4 +146,12 @@ test('corrupted config falls back cleanly, disabled wins over enabled, and inval
   // Invalid FONS_DEBOUNCE_SEC falls back to saved config (20s), matching hasEnvDebounceOverride=false
   assert.equal(hasEnvDebounceOverride({ FONS_DEBOUNCE_SEC: 'abc' }), false);
   assert.equal(resolveConfiguredDebounceMs({ appData, env: { FONS_DEBOUNCE_SEC: 'abc' } }), 20000);
+
+  // No-workspace lookup returns immediately without reading config.json from disk.
+  const brokenAppData = path.join(root, 'unreadable-config-host');
+  fs.mkdirSync(path.join(brokenAppData, 'fons', 'config.json'), { recursive: true });
+  assert.deepEqual(workspaceConfigState({ appData: brokenAppData, rootDir: null }), {
+    enabled: true,
+    explicitState: 'default',
+  });
 });

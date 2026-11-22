@@ -5,15 +5,20 @@ import { pathToFileURL } from 'node:url';
 import { readFonsPanelHtml } from './fons-panel-ui.mjs';
 import { resolveSession, sessionSelector } from './fons-sessions.mjs';
 import {
-  POOL_BODY_LIMIT, POOL_TOKEN_PATTERN, POOL_UPLOAD_LIMIT, POOL_UPLOAD_ROUTES, createBoundPoolRoutes,
+  POOL_BODY_LIMIT, POOL_TOKEN_PATTERN, POOL_UPLOAD_LIMIT, POOL_UPLOAD_ROUTES,
+  createBoundPoolRoutes, isPlainObject,
 } from '../sidecars/fons-pool/main.mjs';
 
 const LOOPBACK_HOST = '127.0.0.1';
 const CONTEXT_ROUTE = '/api/panel/context';
-export const PANEL_URL_PATTERN = /^http:\/\/127\.0\.0\.1:\d+\/#token=[a-f0-9]{64}$/;
+const PANEL_URL_PATTERN = /^http:\/\/127\.0\.0\.1:(\d+)\/#token=[a-f0-9]{64}$/;
 
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
+export function isValidPanelUrl(url) {
+  if (typeof url !== 'string') return false;
+  const match = PANEL_URL_PATTERN.exec(url);
+  if (!match) return false;
+  const port = Number(match[1]);
+  return Number.isSafeInteger(port) && port >= 1 && port <= 65535;
 }
 
 function tokensMatch(expected, provided) {
@@ -101,13 +106,13 @@ async function readJsonBody(req, limit) {
   return parseJsonObject(Buffer.concat(chunks, size));
 }
 
-function createRouteCache() {
+function createRouteCache(env) {
   let cacheKey = '';
   let cachedRoutes = null;
   return (session) => {
     const key = JSON.stringify([session.sessionId, session.appData, session.scope, session.rootDir, session.host]);
     if (key === cacheKey && cachedRoutes) return cachedRoutes;
-    cachedRoutes = createBoundPoolRoutes(session);
+    cachedRoutes = createBoundPoolRoutes(session, { env });
     cacheKey = key;
     return cachedRoutes;
   };
@@ -170,15 +175,14 @@ function requestPath(urlValue) {
 }
 
 function parsePanelPort(raw) {
-  if (raw === undefined) return 0;
   if (!/^\d+$/.test(String(raw))) throw new Error('无效的端口号：' + raw);
   const port = Number(raw);
-  if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('端口号必须在 0 到 65535 之间。');
+  if (!Number.isSafeInteger(port) || port > 65535) throw new Error('端口号必须在 0 到 65535 之间。');
   return port;
 }
 
 export function openPanelUrl(url) {
-  if (typeof url !== 'string' || !PANEL_URL_PATTERN.test(url)) {
+  if (!isValidPanelUrl(url)) {
     throw new Error('无效的本地面板地址。');
   }
   const launch = process.platform === 'win32'
@@ -211,7 +215,7 @@ export async function startPanelServer({ port = 0, selector = {}, env = process.
   const listenPort = parsePanelPort(port);
   const state = {
     resolveActive: createSessionResolver({ selector, env, cwd }),
-    getRoutes: createRouteCache(),
+    getRoutes: createRouteCache(env),
     html: readFonsPanelHtml(),
     token: crypto.randomBytes(32).toString('hex'),
     expectedHost: '',

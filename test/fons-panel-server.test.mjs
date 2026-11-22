@@ -10,7 +10,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { evaluateHook } from '../scripts/fons-hook.mjs';
-import { openPanelUrl, startPanelServer } from '../scripts/fons-panel.mjs';
+import { isValidPanelUrl, openPanelUrl, startPanelServer } from '../scripts/fons-panel.mjs';
 import { readFonsPanelHtml } from '../scripts/fons-panel-ui.mjs';
 
 const CLI = fileURLToPath(new URL('../scripts/fons-cli.mjs', import.meta.url));
@@ -118,7 +118,15 @@ test('panel server binds strictly to 127.0.0.1 and rejects missing/wrong tokens,
   assert.match(panel.token, /^[a-f0-9]{64}$/);
   assert.equal(panel.url, `http://127.0.0.1:${panel.port}/#token=${panel.token}`);
   await assert.rejects(() => startPanelServer({ port: 'not-a-port', env: f.env, cwd: f.workspace }), /端口号/);
-  assert.throws(() => openPanelUrl('http://127.0.0.1:8080/#token=bad&calc'), /面板地址/);
+  assert.equal(isValidPanelUrl(panel.url), true);
+  for (const badUrl of [
+    'http://127.0.0.1:8080/#token=bad&calc',
+    `http://127.0.0.1:0/#token=${panel.token}`,
+    `http://127.0.0.1:70000/#token=${panel.token}`,
+  ]) {
+    assert.equal(isValidPanelUrl(badUrl), false);
+    assert.throws(() => openPanelUrl(badUrl), /面板地址/);
+  }
 
   const baseUrl = `http://127.0.0.1:${panel.port}`;
   const pageRes = await fetch(baseUrl + '/');
@@ -181,7 +189,11 @@ test('panel server supports large attachment upload and preview read closed loop
   const f = fixture(t);
   f.startSession(SESSION_A, '附件会话');
 
-  const panel = await startPanelServer({ selector: { host: 'claude' }, env: f.env, cwd: f.workspace });
+  const panel = await startPanelServer({
+    selector: { host: 'claude' },
+    env: { ...f.env, FONS_DEBOUNCE_SEC: '12' },
+    cwd: f.workspace,
+  });
   t.after(() => panel.close());
   const baseUrl = `http://127.0.0.1:${panel.port}`;
   const sameOrigin = { Origin: baseUrl, 'Sec-Fetch-Site': 'same-origin' };
@@ -209,8 +221,17 @@ test('panel server supports large attachment upload and preview read closed loop
   });
   assert.equal(listRes.status, 200);
   const snapshot = await listRes.json();
+  assert.equal(snapshot.debounceMs, 12000);
   assert.equal(snapshot.items.length, 1);
   const [{ storedName }] = snapshot.items[0].attachments;
+
+  const settingsRes = await post(baseUrl, '/api/pool/settings', {
+    token: panel.token,
+    headers: sameOrigin,
+    body: { conversationId: SESSION_A, workspaceUris },
+  });
+  assert.equal(settingsRes.status, 200);
+  assert.equal((await settingsRes.json()).envOverrides.debounceSec, true);
 
   const attRes = await post(baseUrl, '/api/pool/attachment', {
     token: panel.token,

@@ -31,8 +31,8 @@ function resolveFastFonsDir(input) {
     const appData = findBrainAppData(input.transcriptPath) || findBrainAppData(input.artifactDirectoryPath);
     return appData ? path.join(appData, 'fons', 'no-workspace') : null;
   }
-  const rootDir = input.cwd || input.workspacePaths?.[0];
-  return typeof rootDir === 'string' && rootDir.trim() ? path.join(path.resolve(rootDir), '.agents', 'fons') : null;
+  const rootDir = [input.cwd, input.workspacePaths?.[0]].find((dir) => typeof dir === 'string' && dir.trim());
+  return rootDir ? path.join(path.resolve(rootDir), '.agents', 'fons') : null;
 }
 
 function hasPendingWork(input, event) {
@@ -46,8 +46,13 @@ function hasPendingWork(input, event) {
   return event === 'PreInvocation' && fs.existsSync(path.join(fonsDir, `.retract-${sessionId}.pending`));
 }
 
-const rawInput = fs.readFileSync(0, 'utf8');
-const input = rawInput ? JSON.parse(rawInput) : {};
+function parseHookInput(raw) {
+  if (!raw.trim()) return {};
+  const parsed = JSON.parse(raw);
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+}
+
+const input = parseHookInput(fs.readFileSync(0, 'utf8'));
 const event = input.hookEventName;
 const fallback = event === 'Stop' ? { decision: 'allow' } : {};
 

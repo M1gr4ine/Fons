@@ -117,21 +117,20 @@
       border-color: var(--border);
     }
     .bar button:not(:disabled):active { transform: scale(0.97); }
-    .settings-toggle {
+    .bar .settings-toggle {
       display: inline-flex;
       align-items: center;
       gap: 4px;
       color: var(--muted-foreground);
-      font-size: 11.5px !important;
-      padding: 2px 7px !important;
+      font-size: 11.5px;
+      padding: 2px 7px;
     }
     .settings-toggle svg {
       width: 13px;
       height: 13px;
       flex: none;
     }
-    .settings-toggle:hover,
-    .settings-toggle[aria-expanded="true"] {
+    .settings-toggle:hover {
       color: var(--foreground);
     }
     .settings-toggle[aria-expanded="true"] {
@@ -596,7 +595,6 @@
       width: 15px;
       height: 15px;
       margin: 3px 0 0;
-      flex: none;
       border-radius: 50%;
       border: 1.5px dashed color-mix(in srgb, var(--muted-foreground) 68%, transparent);
       background: transparent;
@@ -655,7 +653,7 @@
     }
     textarea::placeholder { color: var(--muted-foreground); }
     textarea[readonly] { cursor: default; }
-    .row textarea { flex: 1; min-width: 0; transition: color 150ms ease, opacity 150ms ease; }
+    .row textarea { min-width: 0; transition: color 150ms ease, opacity 150ms ease; }
     .row[data-status="done"] textarea {
       color: var(--muted-foreground);
       text-decoration: line-through;
@@ -663,7 +661,6 @@
     }
 
     .row-timer {
-      flex: none;
       width: 34px;
       padding-top: 2px;
       text-align: right;
@@ -694,7 +691,6 @@
     .remove {
       width: 20px;
       height: 20px;
-      flex: none;
       padding: 0;
       border-radius: 5px;
       color: var(--muted-foreground);
@@ -714,7 +710,6 @@
     }
 
     /* Attachment Previews & File Blocks (Chat-Input Style) */
-    .att-list,
     .row-attachments,
     .quick-drafts {
       display: flex;
@@ -1087,8 +1082,8 @@
         <div class="settings-row">
           <span class="settings-label">水位方向</span>
           <div class="settings-seg" role="group" aria-label="水位方向">
-            <button type="button" class="seg-btn" data-testid="fons-flow-up" data-flow-choice="up">↑ 自下而上</button>
-            <button type="button" class="seg-btn" data-testid="fons-flow-right" data-flow-choice="right">→ 自左向右</button>
+            <button type="button" class="seg-btn" data-testid="fons-flow-up">↑ 自下而上</button>
+            <button type="button" class="seg-btn" data-testid="fons-flow-right">→ 自左向右</button>
           </div>
         </div>
       </div>
@@ -1159,7 +1154,7 @@
     </div>
     <div class="quick-shell">
       <div class="quick" data-testid="fons-quick-box">
-        <div class="quick-drafts att-list" data-testid="fons-quick-drafts" hidden></div>
+        <div class="quick-drafts" data-testid="fons-quick-drafts" hidden></div>
         <div class="quick-bar">
           <button type="button" class="quick-attach" data-testid="fons-attach" aria-label="添加附件" title="添加截图或参考文件（支持拖拽与 Ctrl+V 粘贴）" disabled>
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -1194,12 +1189,15 @@
       const FLOW_STORAGE_KEY = 'fons.waterFlow';
       const nativeAutoSize = typeof CSS !== 'undefined' && typeof CSS.supports === 'function' && CSS.supports('field-sizing', 'content');
       const $ = (selector) => document.querySelector(selector);
+      const lightbox = $('[data-testid="fons-lightbox"]');
       const elements = {
         pool: $('.pool'), rows: $('.rows'), empty: $('.empty'), quick: $('[data-testid="fons-quick-add"]'),
         quickBox: $('[data-testid="fons-quick-box"]'), quickDrafts: $('[data-testid="fons-quick-drafts"]'),
         attach: $('[data-testid="fons-attach"]'), fileInput: $('[data-testid="fons-file-input"]'),
         quickSubmit: $('[data-testid="fons-quick-submit"]'), dropBanner: $('[data-testid="fons-drop-banner"]'),
-        lightbox: $('[data-testid="fons-lightbox"]'),
+        lightbox,
+        lightboxImg: lightbox.querySelector('.lightbox-img'),
+        lightboxCaption: lightbox.querySelector('.lightbox-caption'),
         settingsToggle: $('[data-testid="fons-settings-toggle"]'),
         settingsBackdrop: $('[data-testid="fons-settings-backdrop"]'),
         settingsPanel: $('[data-testid="fons-settings-panel"]'),
@@ -1214,11 +1212,10 @@
           $('[data-testid="fons-debounce-preset-15"]'),
           $('[data-testid="fons-debounce-preset-45"]'),
           $('[data-testid="fons-debounce-preset-90"]'),
-        ].filter(Boolean),
+        ],
         stopWait: $('[data-testid="fons-stop-wait"]'),
         stopWaitHint: $('[data-testid="fons-stop-wait-hint"]'),
         autoAttach: $('[data-testid="fons-auto-attach"]'),
-        currentWorkspace: $('[data-testid="fons-current-workspace"]'),
         currentWsName: $('[data-testid="fons-current-ws-name"]'),
         currentWsStatus: $('[data-testid="fons-current-ws-status"]'),
         currentWsPath: $('[data-testid="fons-current-ws-path"]'),
@@ -1244,10 +1241,18 @@
       };
       let noticeTimer;
       const conversationId = () => window.sidecar?.conversationId || '';
+      const sameSession = (id, session) => state.id === id && state.session === session;
+      const normalizeSingleLine = (text) => text.replace(/[\r\n]+/g, ' ').trim();
+      const splitLines = (text) => text.split(/\r\n|\r|\n/).map((line) => line.trim()).filter(Boolean);
       const current = (id, epoch) => {
         syncSession();
         return state.id === id && state.epoch === epoch;
       };
+
+      function clearHold() {
+        state.heldId = null;
+        state.holdSentAt = 0;
+      }
 
       function readSavedFlowMode() {
         try {
@@ -1259,33 +1264,24 @@
 
       function syncFlowButtons() {
         const upward = state.flowMode === 'up';
-        if (elements.flowUp) {
-          elements.flowUp.dataset.active = upward ? 'true' : 'false';
-          elements.flowUp.setAttribute('aria-pressed', upward ? 'true' : 'false');
-        }
-        if (elements.flowRight) {
-          elements.flowRight.dataset.active = upward ? 'false' : 'true';
-          elements.flowRight.setAttribute('aria-pressed', upward ? 'false' : 'true');
-        }
+        elements.flowUp.dataset.active = upward ? 'true' : 'false';
+        elements.flowUp.setAttribute('aria-pressed', upward ? 'true' : 'false');
+        elements.flowRight.dataset.active = upward ? 'false' : 'true';
+        elements.flowRight.setAttribute('aria-pressed', upward ? 'false' : 'true');
       }
 
       function applyFlowMode(mode) {
         state.flowMode = mode === 'right' ? 'right' : 'up';
-        if (elements.pool) {
-          elements.pool.dataset.switching = 'true';
-          elements.pool.dataset.flow = state.flowMode;
-        }
+        elements.pool.dataset.switching = 'true';
+        elements.pool.dataset.flow = state.flowMode;
         syncFlowButtons();
         try { window.localStorage?.setItem(FLOW_STORAGE_KEY, state.flowMode); } catch {}
         updateWaterLevels();
-        if (elements.pool) {
-          void elements.pool.offsetWidth;
-          delete elements.pool.dataset.switching;
-        }
+        void elements.pool.offsetWidth;
+        delete elements.pool.dataset.switching;
       }
 
       function showSettingsError(message) {
-        if (!elements.settingsError) return;
         elements.settingsError.textContent = message || '';
         elements.settingsError.hidden = !message;
       }
@@ -1295,7 +1291,7 @@
           elements.debounceInput, elements.stopWait, elements.autoAttach,
           elements.currentWsToggle, elements.registerSession, ...elements.debouncePresets,
         ]) {
-          if (el) el.disabled = disabled;
+          el.disabled = disabled;
         }
       }
 
@@ -1306,8 +1302,7 @@
 
       function renderDebouncePresets(seconds) {
         for (const chip of elements.debouncePresets) {
-          const preset = Number(chip.dataset?.debouncePreset);
-          chip.dataset.active = preset === seconds ? 'true' : 'false';
+          chip.dataset.active = Number(chip.dataset.debouncePreset) === seconds ? 'true' : 'false';
         }
       }
 
@@ -1336,10 +1331,9 @@
       }
 
       function renderCurrentWorkspaceCard(data) {
-        if (!elements.currentWorkspace) return;
         if (data?.currentWorkspace) renderWorkspaceCard(data.currentWorkspace);
         else renderNoWorkspaceCard(data);
-        if (elements.registerSession) elements.registerSession.hidden = !data?.canRegisterSession;
+        elements.registerSession.hidden = !data?.canRegisterSession;
       }
 
       function makeWorkspaceRuleRow(dirPath, tag) {
@@ -1366,7 +1360,6 @@
       }
 
       function renderWorkspaceRules(config) {
-        if (!elements.workspaceRules || !elements.workspaceList) return;
         const enabled = config?.enabledWorkspaces || [];
         const disabled = config?.disabledWorkspaces || [];
         const rows = [
@@ -1386,20 +1379,16 @@
         }
         const { config, envOverrides } = data;
         setSettingsControlsDisabled(state.settingsBusy);
-        if (elements.debounceInput) elements.debounceInput.value = String(config.debounceSec);
+        elements.debounceInput.value = String(config.debounceSec);
         renderDebouncePresets(config.debounceSec);
-        if (elements.debounceHint) {
-          elements.debounceHint.textContent = envOverrides?.debounceSec
-            ? '当前受环境变量 FONS_DEBOUNCE_SEC 覆盖'
-            : '设为 0 即时投递，保存后立即生效';
-        }
-        if (elements.stopWait) elements.stopWait.checked = Boolean(config.stopWaitDebounce);
-        if (elements.stopWaitHint) {
-          elements.stopWaitHint.textContent = envOverrides?.stopWaitDebounce
-            ? '当前受环境变量 FONS_STOP_WAIT_DEBOUNCE 覆盖'
-            : '关闭时本轮结束立刻兜底未编辑草稿';
-        }
-        if (elements.autoAttach) elements.autoAttach.checked = Boolean(config.autoAttachWorkspaces);
+        elements.debounceHint.textContent = envOverrides?.debounceSec
+          ? '当前受环境变量 FONS_DEBOUNCE_SEC 覆盖'
+          : '设为 0 即时投递，保存后立即生效';
+        elements.stopWait.checked = Boolean(config.stopWaitDebounce);
+        elements.stopWaitHint.textContent = envOverrides?.stopWaitDebounce
+          ? '当前受环境变量 FONS_STOP_WAIT_DEBOUNCE 覆盖'
+          : '关闭时本轮结束立刻兜底未编辑草稿';
+        elements.autoAttach.checked = Boolean(config.autoAttachWorkspaces);
         renderCurrentWorkspaceCard(data);
         renderWorkspaceRules(config);
       }
@@ -1421,12 +1410,8 @@
         showSettingsError('');
         renderSettings();
         try {
-          const data = await request('/api/pool/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settingsRequestPayload(update)),
-          });
-          if (seq !== state.settingsSeq || id !== state.id || session !== state.session) return null;
+          const data = await request('/api/pool/settings', settingsRequestPayload(update));
+          if (seq !== state.settingsSeq || !sameSession(id, session)) return null;
           state.settingsData = data;
           state.settingsBusy = false;
           renderSettings();
@@ -1437,7 +1422,7 @@
           }
           return data;
         } catch (error) {
-          if (seq !== state.settingsSeq || id !== state.id || session !== state.session) return null;
+          if (seq !== state.settingsSeq || !sameSession(id, session)) return null;
           state.settingsBusy = false;
           showSettingsError(error.message || '读取设置失败');
           renderSettings();
@@ -1446,31 +1431,29 @@
       }
 
       function openSettings() {
-        if (!elements.settingsPanel) return;
         syncSession();
         state.settingsOpen = true;
         elements.settingsPanel.hidden = false;
-        if (elements.settingsBackdrop) elements.settingsBackdrop.hidden = false;
-        elements.settingsToggle?.setAttribute('aria-expanded', 'true');
+        elements.settingsBackdrop.hidden = false;
+        elements.settingsToggle.setAttribute('aria-expanded', 'true');
         showSettingsError('');
         renderSettings();
         void sendSettings(undefined);
       }
 
       function closeSettings() {
-        if (!state.settingsOpen && elements.settingsPanel?.hidden !== false) return;
+        if (!state.settingsOpen && elements.settingsPanel.hidden) return;
         state.settingsOpen = false;
         state.settingsSeq += 1;
         state.settingsBusy = false;
-        if (elements.settingsPanel) elements.settingsPanel.hidden = true;
-        if (elements.settingsBackdrop) elements.settingsBackdrop.hidden = true;
-        elements.settingsToggle?.setAttribute('aria-expanded', 'false');
+        elements.settingsPanel.hidden = true;
+        elements.settingsBackdrop.hidden = true;
+        elements.settingsToggle.setAttribute('aria-expanded', 'false');
         showSettingsError('');
       }
 
       function commitDebounceInput() {
-        if (!elements.debounceInput) return;
-        const raw = String(elements.debounceInput.value ?? '').trim();
+        const raw = elements.debounceInput.value.trim();
         const parsed = Number(raw);
         if (!raw || !Number.isInteger(parsed) || parsed < 0 || parsed > 3600) {
           if (state.settingsData?.config) elements.debounceInput.value = String(state.settingsData.config.debounceSec);
@@ -1500,15 +1483,13 @@
       function updateAvailability() {
         const disabled = !state.registered;
         elements.quick.disabled = disabled;
-        if (elements.attach) elements.attach.disabled = disabled;
-        if (elements.quickSubmit) {
-          const canSend = !disabled && (
-            Boolean(elements.quick.value.trim()) ||
-            state.draftAttachments.length > 0 ||
-            state.draftPrepPending > 0
-          );
-          elements.quickSubmit.disabled = !canSend;
-        }
+        elements.attach.disabled = disabled;
+        const canSend = !disabled && (
+          Boolean(elements.quick.value.trim()) ||
+          state.draftAttachments.length > 0 ||
+          state.draftPrepPending > 0
+        );
+        elements.quickSubmit.disabled = !canSend;
         if (disabled) elements.archive.disabled = true;
       }
 
@@ -1539,40 +1520,31 @@
           delete state.dropRow.dataset.dropTarget;
           state.dropRow = null;
         }
-        if (elements.pool) delete elements.pool.dataset.dropping;
-        if (elements.dropBanner) elements.dropBanner.hidden = true;
+        delete elements.pool.dataset.dropping;
+        elements.dropBanner.hidden = true;
       }
 
       function closeLightbox() {
-        if (!elements.lightbox) return;
         elements.lightbox.hidden = true;
-        const img = elements.lightbox.querySelector?.('.lightbox-img');
-        if (img) img.src = '';
+        elements.lightboxImg.src = '';
       }
 
       function openLightbox(url, label) {
-        if (!elements.lightbox || !url) return;
-        const img = elements.lightbox.querySelector?.('.lightbox-img');
-        const cap = elements.lightbox.querySelector?.('.lightbox-caption');
-        if (img) {
-          img.src = url;
-          img.alt = label || '';
-        }
-        if (cap) {
-          cap.textContent = label || '';
-          cap.hidden = !label;
-        }
+        if (!url) return;
+        elements.lightboxImg.src = url;
+        elements.lightboxImg.alt = label || '';
+        elements.lightboxCaption.textContent = label || '';
+        elements.lightboxCaption.hidden = !label;
         elements.lightbox.hidden = false;
       }
 
       function showEmpty(message, kind = 'context') {
         elements.empty.textContent = message;
         elements.empty.hidden = false;
-        if (elements.pool) elements.pool.dataset.empty = kind;
+        elements.pool.dataset.empty = kind;
       }
 
       function updateCount(openCount) {
-        if (!elements.count) return;
         elements.count.hidden = !openCount;
         elements.count.textContent = openCount ? String(openCount) : '';
       }
@@ -1586,8 +1558,7 @@
         state.refreshNeeded = false;
         state.busy = false;
         state.debounceMs = DEFAULT_DEBOUNCE_MS;
-        state.heldId = null;
-        state.holdSentAt = 0;
+        clearHold();
         state.composing = false;
         state.lastTypedAt = 0;
         state.loadedOnce = false;
@@ -1596,8 +1567,8 @@
         clearDragVisuals();
         closeLightbox();
         state.settingsData = null;
-        elements.workspaceList?.replaceChildren();
-        if (elements.workspaceRules) elements.workspaceRules.hidden = true;
+        elements.workspaceList.replaceChildren();
+        elements.workspaceRules.hidden = true;
         closeSettings();
         clearAttachmentCaches();
         elements.rows.replaceChildren();
@@ -1652,17 +1623,18 @@
         void poll();
       }
 
-      async function request(url, options = {}) {
+      async function request(url, payload) {
         if (typeof window.sidecar?.fetch !== 'function') throw new Error('无法连接宿主，请在 Antigravity 中打开灵感池。');
-        const response = await window.sidecar.fetch(url, options);
+        const response = await window.sidecar.fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
         if (!response.ok) {
-          let message = `请求失败（${response.status}）`;
-          try {
-            const data = await response.json();
-            if (typeof data?.error === 'string' && data.error.trim()) message = data.error;
-          } catch {
-            message = `请求失败（${response.status}）`;
-          }
+          const data = await response.json().catch(() => null);
+          const message = typeof data?.error === 'string' && data.error.trim()
+            ? data.error
+            : `请求失败（${response.status}）`;
           const error = new Error(message);
           error.status = response.status;
           throw error;
@@ -1673,8 +1645,7 @@
       function clearPoolRows() {
         state.registered = false;
         state.etag = '';
-        state.heldId = null;
-        state.holdSentAt = 0;
+        clearHold();
         elements.rows.replaceChildren();
         updateCount(0);
         updateAvailability();
@@ -1691,12 +1662,11 @@
       }
 
       function rowRemainingMs(node) {
-        if (node.frozenMs !== null && node.frozenMs !== undefined) return node.frozenMs;
+        if (node.frozenMs != null) return node.frozenMs;
         return Math.max(0, (node.deadline || 0) - Date.now());
       }
 
       function setWaterScale(water, ratio) {
-        if (!water) return;
         const rightward = state.flowMode === 'right';
         water.style.transformOrigin = rightward ? 'left center' : 'center bottom';
         water.style.transform = rightward ? `scaleX(${ratio.toFixed(4)})` : `scaleY(${ratio.toFixed(4)})`;
@@ -1712,12 +1682,11 @@
       }
 
       function applyRowWater(node, totalMs) {
-        const water = node.querySelector('.row-water');
-        const timer = node.querySelector('.row-timer');
+        const { water, timer } = node.refs;
         if (node.item?.status !== 'buffering') {
           delete node.dataset.holding;
           setWaterScale(water, 0);
-          if (timer) timer.textContent = '';
+          timer.textContent = '';
           return 'none';
         }
         const rowPhase = isNodeHeld(node) ? 'holding' : 'buffering';
@@ -1726,19 +1695,19 @@
         const remaining = rowRemainingMs(node);
         const seconds = Math.ceil(remaining / 1000);
         setWaterScale(water, Math.max(0.06, Math.min(1, 1 - remaining / totalMs)));
-        if (timer) timer.textContent = rowTimerLabel(rowPhase, seconds);
+        timer.textContent = rowTimerLabel(rowPhase, seconds);
         return rowPhase;
       }
 
       function updateWaterLevels() {
-        const total = Math.max(1000, typeof state.debounceMs === 'number' ? state.debounceMs : DEFAULT_DEBOUNCE_MS);
+        const total = Math.max(1000, state.debounceMs);
         let phase = 'idle';
         for (const node of elements.rows.children) {
           const rowState = applyRowWater(node, total);
           if (rowState === 'holding') phase = 'holding';
           else if (rowState === 'buffering' && phase === 'idle') phase = 'buffering';
         }
-        if (elements.pool) elements.pool.dataset.phase = phase;
+        elements.pool.dataset.phase = phase;
       }
 
       function rowLabel(status) {
@@ -1775,23 +1744,20 @@
       }
 
       function fileBadgeLabel(name) {
-        const dot = String(name || '').lastIndexOf('.');
-        if (dot < 0 || dot === name.length - 1) return 'FILE';
-        const ext = name.slice(dot + 1).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        const text = String(name ?? '');
+        const dot = text.lastIndexOf('.');
+        if (dot < 0 || dot === text.length - 1) return 'FILE';
+        const ext = text.slice(dot + 1).replace(/[^A-Za-z0-9]/g, '').toUpperCase();
         return ext ? ext.slice(0, 4) : 'FILE';
       }
 
       function bytesToBase64(bytes) {
-        if (typeof btoa === 'function') {
-          let binary = '';
-          const step = 0x8000;
-          for (let i = 0; i < bytes.length; i += step) {
-            binary += String.fromCharCode(...bytes.subarray(i, i + step));
-          }
-          return btoa(binary);
+        let binary = '';
+        const step = 0x8000;
+        for (let i = 0; i < bytes.length; i += step) {
+          binary += String.fromCharCode(...bytes.subarray(i, i + step));
         }
-        if (typeof Buffer !== 'undefined') return Buffer.from(bytes).toString('base64');
-        throw new Error('当前环境不支持 Base64 编码');
+        return btoa(binary);
       }
 
       function base64ToPreviewUrl(dataBase64, mimeType) {
@@ -1812,7 +1778,7 @@
         const rawName = String(file.name || '').trim();
         const mimeType = String(file.type || '').trim();
         const extGuess = IMAGE_MIME_RE.test(mimeType)
-          ? `.${mimeType.split('/')[1].replace('jpeg', 'jpg').replace('svg+xml', 'svg')}`
+          ? `.${mimeType.split('/')[1].toLowerCase().replace('jpeg', 'jpg').replace('svg+xml', 'svg')}`
           : '';
         const name = rawName || `paste-${index + 1}${extGuess || '.bin'}`;
         if (typeof file.size === 'number' && file.size === 0) {
@@ -1823,28 +1789,28 @@
           showNotice(`单个附件不能超过 10 MB：${name}`);
           return null;
         }
-        let dataBase64 = '';
-        let byteSize = Number(file.size) || 0;
-        if (typeof file.dataBase64 === 'string' && file.dataBase64) {
-          dataBase64 = file.dataBase64;
-          if (!byteSize) byteSize = Math.floor((dataBase64.length * 3) / 4);
-        } else if (typeof file.arrayBuffer === 'function') {
-          const buffer = await file.arrayBuffer();
-          const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-          byteSize = bytes.byteLength;
-          if (!byteSize) {
-            showNotice(`空文件已跳过：${name}`);
-            return null;
-          }
-          if (byteSize > MAX_ATTACHMENT_BYTES) {
-            showNotice(`单个附件不能超过 10 MB：${name}`);
-            return null;
-          }
-          dataBase64 = bytesToBase64(bytes);
-        } else {
+        if (typeof file.arrayBuffer !== 'function') {
           showNotice(`无法读取文件：${name}`);
           return null;
         }
+        let buffer;
+        try {
+          buffer = await file.arrayBuffer();
+        } catch {
+          showNotice(`无法读取文件：${name}`);
+          return null;
+        }
+        const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+        const byteSize = bytes.byteLength;
+        if (!byteSize) {
+          showNotice(`空文件已跳过：${name}`);
+          return null;
+        }
+        if (byteSize > MAX_ATTACHMENT_BYTES) {
+          showNotice(`单个附件不能超过 10 MB：${name}`);
+          return null;
+        }
+        const dataBase64 = bytesToBase64(bytes);
         const isImage = IMAGE_MIME_RE.test(mimeType) || IMAGE_EXT_RE.test(name);
         let previewUrl = '';
         if (isImage) {
@@ -1893,11 +1859,9 @@
         const id = state.id;
         const session = state.session;
         const task = request('/api/pool/attachment', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ conversationId: id, workspaceUris: state.workspaceUris, storedName }),
+          conversationId: id, workspaceUris: state.workspaceUris, storedName,
         }).then((data) => {
-          if (state.id !== id || state.session !== session || !data?.dataBase64) return '';
+          if (!sameSession(id, session) || !data?.dataBase64) return '';
           const url = base64ToPreviewUrl(data.dataBase64, data.mimeType);
           state.thumbUrls.set(storedName, url);
           return url;
@@ -1932,7 +1896,7 @@
               img.src = cached;
             } else if (att.storedName) {
               void ensureThumbnailUrl(att.storedName).then((url) => {
-                if (url && card.isConnected !== false) img.src = url;
+                if (url && card.isConnected) img.src = url;
               });
             }
             img.addEventListener('click', () => {
@@ -1942,9 +1906,10 @@
             card.append(img);
           }
         } else {
+          const extLabel = fileBadgeLabel(att.name);
           const badge = document.createElement('span');
           badge.className = 'att-badge';
-          badge.textContent = fileBadgeLabel(att.name);
+          badge.textContent = extLabel;
           const info = document.createElement('span');
           info.className = 'att-info';
           const nameEl = document.createElement('span');
@@ -1952,7 +1917,7 @@
           nameEl.textContent = att.name;
           const metaEl = document.createElement('span');
           metaEl.className = 'att-meta';
-          metaEl.textContent = `${fileBadgeLabel(att.name)} · ${sizeLabel}`;
+          metaEl.textContent = `${extLabel} · ${sizeLabel}`;
           info.append(nameEl, metaEl);
           card.append(badge, info);
         }
@@ -1965,7 +1930,7 @@
           removeBtn.setAttribute('aria-label', `移除附件 ${att.name}`);
           removeBtn.setAttribute('title', `移除 ${att.name}`);
           removeBtn.addEventListener('click', (event) => {
-            event.stopPropagation?.();
+            event.stopPropagation();
             onRemove();
           });
           card.append(removeBtn);
@@ -1975,12 +1940,9 @@
 
       function renderDraftAttachments() {
         const drafts = state.draftAttachments;
-        if (elements.quickBox) {
-          if (drafts.length) elements.quickBox.dataset.hasDraft = 'true';
-          else delete elements.quickBox.dataset.hasDraft;
-        }
+        if (drafts.length) elements.quickBox.dataset.hasDraft = 'true';
+        else delete elements.quickBox.dataset.hasDraft;
         updateAvailability();
-        if (!elements.quickDrafts) return;
         if (!drafts.length) {
           elements.quickDrafts.replaceChildren();
           elements.quickDrafts.hidden = true;
@@ -2000,8 +1962,7 @@
       }
 
       function renderRowAttachments(node, item) {
-        const container = node.querySelector('.row-attachments');
-        if (!container) return;
+        const container = node.refs.attWrap;
         const atts = itemAttachments(item);
         const editable = item.status === 'buffering';
         const sig = atts.map((a) => `${a.storedName}:${a.name}:${a.size}:${a.missing ? 1 : 0}:${editable ? 1 : 0}`).join('|');
@@ -2028,8 +1989,8 @@
         }
         const remaining = Math.max(0, item.remainingMs ?? state.debounceMs);
         node.deadline = Date.now() + remaining;
-        if (node.focused || node.dirty || node.saving || item.editingHold) {
-          if (node.frozenMs === null || node.frozenMs === undefined) node.frozenMs = remaining;
+        if (isNodeHeld(node)) {
+          if (node.frozenMs == null) node.frozenMs = remaining;
         } else {
           node.frozenMs = null;
         }
@@ -2044,11 +2005,10 @@
         const atts = itemAttachments(item);
         if (!note && atts.length) node.dataset.emptyNote = 'true';
         else delete node.dataset.emptyNote;
-        const check = node.querySelector('input');
+        const { check, status, input } = node.refs;
         check.checked = item.status === 'done';
         check.setAttribute('title', checkTooltip(item.status));
-        node.querySelector('.status').textContent = rowLabel(item.status);
-        const input = node.querySelector('textarea');
+        status.textContent = rowLabel(item.status);
         input.readOnly = !editable;
         input.setAttribute('title', inputTooltip(item.status));
         input.setAttribute('placeholder', editable && atts.length ? '添加说明（可选）…' : '');
@@ -2070,7 +2030,7 @@
 
       function validNode(node) {
         syncSession();
-        return node.isConnected && node.conversation === state.id && node.session === state.session && state.registered;
+        return node.isConnected && sameSession(node.conversation, node.session) && state.registered;
       }
 
       function handleMutationFailure(error, id, epoch) {
@@ -2088,7 +2048,7 @@
         state.tail = new Promise((resolve) => { release = resolve; });
         await previous;
         syncSession();
-        if (id !== state.id || session !== state.session || !state.registered) { release(); return null; }
+        if (!sameSession(id, session) || !state.registered) { release(); return null; }
         state.busy = true;
         state.epoch += 1;
         state.polling = null;
@@ -2098,8 +2058,7 @@
           const payload = typeof fields === 'function' ? fields() : fields;
           if (!payload) return null;
           result = await request(`/api/pool/${action}`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ conversationId: id, workspaceUris: state.workspaceUris, ...payload }),
+            conversationId: id, workspaceUris: state.workspaceUris, ...payload,
           });
           if (!current(id, epoch)) return null;
           if (result.locked) showNotice('已投递或已完成的灵感不支持编辑');
@@ -2114,7 +2073,7 @@
           finally { release(); }
         }
         syncSession();
-        return id === state.id && session === state.session ? result : null;
+        return sameSession(id, session) ? result : null;
       }
 
       function activeHeldNode() {
@@ -2135,7 +2094,7 @@
       }
 
       function freezeNodeDeadline(target) {
-        if (target.frozenMs === null || target.frozenMs === undefined) {
+        if (target.frozenMs == null) {
           target.frozenMs = Math.max(0, (target.deadline || 0) - Date.now());
         }
       }
@@ -2145,9 +2104,8 @@
         const nextId = target?.item?.id || null;
         if (state.heldId && state.heldId !== nextId) {
           const releaseId = state.heldId;
-          state.heldId = null;
-          state.holdSentAt = 0;
-          if (isValidHoldId(releaseId)) void mutate('release', { id: releaseId });
+          clearHold();
+          void mutate('release', { id: releaseId });
         }
         if (target && nextId) {
           freezeNodeDeadline(target);
@@ -2163,76 +2121,85 @@
       }
 
       function releaseNodeFreeze(node) {
-        if (node.frozenMs !== null && node.frozenMs !== undefined) {
+        if (node.frozenMs != null) {
           node.deadline = Date.now() + node.frozenMs;
           node.frozenMs = null;
         }
       }
 
       function applySavedRow(node, value, previousItemId, result) {
-        if (!result.conflict && state.heldId === previousItemId) {
-          state.heldId = null;
-          state.holdSentAt = 0;
-        }
+        if (!result.conflict && state.heldId === previousItemId) clearHold();
         node.refreshValue = result.conflict ? null : value;
         node.conflicted = !!result.conflict;
-        const latest = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
+        const latest = normalizeSingleLine(node.refs.input.value);
         node.dirty = !result.conflict && latest !== value;
       }
 
       function shouldResaveRow(node, result) {
         if (!result || result.conflict || !node.dirty) return false;
-        return document.activeElement !== node.querySelector('textarea') && validNode(node);
+        return document.activeElement !== node.refs.input && validNode(node);
+      }
+
+      function runRowUpdate(node, buildFields) {
+        let sentNote = '';
+        let previousItemId = node.item.id;
+        const task = mutate('update', () => {
+          if (!validNode(node) || node.item.status !== 'buffering') return null;
+          const fields = buildFields();
+          if (!fields) return null;
+          sentNote = fields.newText;
+          previousItemId = node.item.id;
+          return { ...itemArguments(node), ...fields };
+        }, node.conversation, (result) => applySavedRow(node, sentNote, previousItemId, result)).then((result) => {
+          node.saving = null;
+          if (shouldResaveRow(node, result)) queueMicrotask(() => { void saveRow(node); });
+          return result;
+        });
+        node.saving = task;
+        return task;
       }
 
       function saveRow(node) {
         if (node.saving) return Promise.resolve(node.saving);
         if (!validNode(node) || node.item.status !== 'buffering') return Promise.resolve({ conflict: false });
-        const value = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
-        const atts = itemAttachments(node.item);
+        const value = normalizeSingleLine(node.refs.input.value);
         if (value === itemNote(node.item)) { node.dirty = false; return Promise.resolve({ conflict: false }); }
-        if (!value && !atts.length) { showNotice('灵感内容不能为空'); return Promise.resolve(null); }
-        const id = node.conversation;
-        const previousItemId = node.item.id;
-        const fields = () => {
-          if (!validNode(node)) return null;
+        if (!value && !itemAttachments(node.item).length) { showNotice('灵感内容不能为空'); return Promise.resolve(null); }
+        return runRowUpdate(node, () => {
           const currentAtts = itemAttachments(node.item);
           return currentAtts.length
-            ? { ...itemArguments(node), newText: value, keepAttachments: currentAtts.map((a) => a.storedName) }
-            : { ...itemArguments(node), newText: value };
-        };
-        node.saving = mutate('update', fields, id, (result) => applySavedRow(node, value, previousItemId, result)).then((result) => {
-          node.saving = null;
-          if (shouldResaveRow(node, result)) queueMicrotask(() => { void saveRow(node); });
-          return result;
+            ? { newText: value, keepAttachments: currentAtts.map((a) => a.storedName) }
+            : { newText: value };
         });
-        return node.saving;
       }
 
       async function removeRowAttachment(node, storedName) {
         if (node.removing || !validNode(node) || node.item.status !== 'buffering') return;
         if (node.saving) {
           const saved = await node.saving;
-          if (!saved || saved.conflict || !validNode(node)) return;
+          if (!saved || saved.conflict || !validNode(node) || node.item.status !== 'buffering') return;
         }
-        const remaining = itemAttachments(node.item)
-          .filter((att) => att.storedName !== storedName)
-          .map((att) => att.storedName);
-        const currentNote = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
-        if (!remaining.length && !currentNote) {
+        const initialRemaining = itemAttachments(node.item).filter((att) => att.storedName !== storedName);
+        if (!initialRemaining.length && !normalizeSingleLine(node.refs.input.value)) {
           await deleteRow(node);
           return;
         }
-        const id = node.conversation;
-        const previousItemId = node.item.id;
-        node.saving = mutate('update', () => (
-          validNode(node)
-            ? { ...itemArguments(node), newText: currentNote, keepAttachments: remaining }
-            : null
-        ), id, (result) => applySavedRow(node, currentNote, previousItemId, result)).finally(() => {
-          node.saving = null;
+        let shouldDelete = false;
+        await runRowUpdate(node, () => {
+          const remaining = itemAttachments(node.item)
+            .filter((att) => att.storedName !== storedName)
+            .map((att) => att.storedName);
+          const currentNote = normalizeSingleLine(node.refs.input.value);
+          if (!remaining.length && !currentNote) {
+            shouldDelete = true;
+            return null;
+          }
+          return { newText: currentNote, keepAttachments: remaining };
         });
-        await node.saving;
+        if (shouldDelete) {
+          await deleteRow(node);
+          return;
+        }
         syncHold();
       }
 
@@ -2243,28 +2210,15 @@
           const saved = await node.saving;
           if (!saved || saved.conflict || !validNode(node) || node.item.status !== 'buffering') return;
         }
-        const existing = itemAttachments(node.item);
-        const prepared = await prepareClientFiles(rawFiles, existing.length);
+        const prepared = await prepareClientFiles(rawFiles, itemAttachments(node.item).length);
         for (const item of prepared) revokeManagedUrl(item.previewUrl);
         if (!prepared.length || !validNode(node) || node.item.status !== 'buffering') return;
         const newAttachments = prepared.map(({ name, mimeType, dataBase64 }) => ({ name, mimeType, dataBase64 }));
-        const id = node.conversation;
-        let sentNote = '';
-        let previousItemId = node.item.id;
-        node.saving = mutate('update', () => {
-          if (!validNode(node) || node.item.status !== 'buffering') return null;
-          sentNote = node.querySelector('textarea').value.replace(/[\r\n]+/g, ' ').trim();
-          previousItemId = node.item.id;
-          return {
-            ...itemArguments(node),
-            newText: sentNote,
-            keepAttachments: itemAttachments(node.item).map((a) => a.storedName),
-            newAttachments,
-          };
-        }, id, (result) => applySavedRow(node, sentNote, previousItemId, result)).finally(() => {
-          node.saving = null;
-        });
-        await node.saving;
+        await runRowUpdate(node, () => ({
+          newText: normalizeSingleLine(node.refs.input.value),
+          keepAttachments: itemAttachments(node.item).map((a) => a.storedName),
+          newAttachments,
+        }));
         syncHold();
       }
 
@@ -2277,18 +2231,18 @@
         state.draftPrepPending += 1;
         updateAvailability();
         const next = state.draftPrepTail.then(async () => {
-          if (state.id !== id || state.session !== session || !state.registered) return;
+          if (!sameSession(id, session) || !state.registered) return;
           const prepared = await prepareClientFiles(rawFiles, state.draftAttachments.length);
           if (!prepared.length) return;
-          if (state.id !== id || state.session !== session || !state.registered) {
+          if (!sameSession(id, session) || !state.registered) {
             for (const item of prepared) revokeManagedUrl(item.previewUrl);
             return;
           }
           state.draftAttachments.push(...prepared);
           renderDraftAttachments();
-          elements.quick.focus?.();
+          elements.quick.focus();
         }).finally(() => {
-          if (state.id === id && state.session === session) {
+          if (sameSession(id, session)) {
             state.draftPrepPending = Math.max(0, state.draftPrepPending - 1);
             updateAvailability();
           }
@@ -2298,7 +2252,7 @@
       }
 
       function restoreCheck(node) {
-        if (validNode(node)) node.querySelector('input').checked = node.item.status === 'done';
+        if (validNode(node)) node.refs.check.checked = node.item.status === 'done';
       }
 
       async function changeCheck(node) {
@@ -2324,7 +2278,7 @@
         if (node.item.status === 'delivered' && !window.confirm('模型已收到该条，将发送撤回通知')) return;
         if (!validNode(node)) return;
         node.removing = true;
-        if (state.heldId === node.item.id) { state.heldId = null; state.holdSentAt = 0; }
+        if (state.heldId === node.item.id) clearHold();
         try {
           await mutate('remove', () => validNode(node) ? itemArguments(node) : null, node.conversation, (result) => {
             if (result.conflict) node.conflicted = true;
@@ -2339,11 +2293,11 @@
         for (let i = afterIndex + 1; i < elements.rows.children.length; i++) {
           const row = elements.rows.children[i];
           if (row.item?.status === 'buffering') {
-            row.querySelector('textarea')?.focus?.();
+            row.refs.input.focus();
             return;
           }
         }
-        elements.quick.focus?.();
+        elements.quick.focus();
       }
 
       function onRowKey(event, node) {
@@ -2398,7 +2352,7 @@
       function animateExit(node, mode, box) {
         if (!box?.height || typeof node.animate !== 'function' || prefersReducedMotion()) return;
         const host = elements.pool;
-        if (!host || typeof host.getBoundingClientRect !== 'function') return;
+        if (typeof host.getBoundingClientRect !== 'function') return;
         const base = host.getBoundingClientRect();
         const ghost = node.cloneNode(true);
         ghost.className = 'row ghost';
@@ -2406,8 +2360,8 @@
         delete ghost.dataset.fresh;
         delete ghost.dataset.holding;
         ghost.setAttribute('aria-hidden', 'true');
-        ghost.querySelector('textarea').value = node.querySelector('textarea').value;
-        ghost.querySelector('input').checked = node.querySelector('input').checked;
+        ghost.querySelector('textarea').value = node.refs.input.value;
+        ghost.querySelector('input').checked = node.refs.check.checked;
         ghost.style.top = `${box.top - base.top}px`;
         ghost.style.left = `${box.left - base.left}px`;
         ghost.style.width = `${box.width}px`;
@@ -2422,7 +2376,7 @@
           { opacity: 1, transform: 'translate(0, 0) scale(1)' },
           { opacity: 0, transform: target },
         ], { duration: mode === 'remove' ? 200 : 170, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'forwards' });
-        const cleanup = () => ghost.remove?.();
+        const cleanup = () => ghost.remove();
         anim.onfinish = cleanup;
         anim.oncancel = cleanup;
       }
@@ -2430,11 +2384,7 @@
       function detachRow(node, box) {
         const mode = node.removing ? 'remove' : (node.item?.status === 'done' ? 'up' : 'fade');
         animateExit(node, mode, box);
-        if (typeof node.remove === 'function') node.remove();
-        else {
-          const index = elements.rows.children.indexOf(node);
-          if (index >= 0) elements.rows.children.splice(index, 1);
-        }
+        node.remove();
       }
 
       function createRow(item) {
@@ -2470,6 +2420,7 @@
         remove.textContent = '×';
         remove.setAttribute('aria-label', '删除灵感');
         remove.setAttribute('title', '删除灵感');
+        node.refs = { water, check, input, attWrap, timer, status, remove };
         node.append(water, check, input, attWrap, timer, status, remove);
         check.addEventListener('change', () => { void changeCheck(node); });
         input.addEventListener('compositionstart', () => { state.composing = true; });
@@ -2508,7 +2459,7 @@
         if (node.refreshValue !== nextNote && itemNote(node.item) !== nextNote && !node.conflicted && item.status === 'buffering') return;
         updateRow(node, item);
         if (node.conflicted || item.status !== 'buffering') {
-          const input = node.querySelector('textarea');
+          const { input } = node.refs;
           input.value = nextNote;
           node.dirty = false;
           resize(input);
@@ -2520,7 +2471,7 @@
       function activeEditingRow() {
         const active = document.activeElement;
         const row = active?.closest?.('.row');
-        return row && active === row.querySelector('textarea') ? row : null;
+        return row && active === row.refs?.input ? row : null;
       }
 
       function isProtectedRow(node, editingRow) {
@@ -2592,7 +2543,7 @@
             updateRow(node, item);
             const anchor = elements.rows.children[position];
             if (node !== active && !node.focused && node !== anchor) elements.rows.insertBefore(node, anchor || null);
-            resize(node.querySelector('textarea'));
+            resize(node.refs.input);
           }
           position += 1;
         }
@@ -2649,10 +2600,7 @@
         const payload = { conversationId: id, workspaceUris: state.workspaceUris };
         if (state.etag) payload.etag = state.etag;
         try {
-          const data = await request('/api/pool', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
+          const data = await request('/api/pool', payload);
           if (current(id, epoch) && state.polling === ticket && !data.unchanged) applySnapshot(data);
         } catch (error) {
           if (current(id, epoch) && state.polling === ticket) showFailure(error);
@@ -2679,9 +2627,10 @@
         } else {
           updateAvailability();
         }
+        const note = normalizeSingleLine(expectedValue);
         const payload = drafts.length
           ? {
-              texts: expectedValue.replace(/[\r\n]+/g, ' ').trim() ? [expectedValue.replace(/[\r\n]+/g, ' ').trim()] : [],
+              texts: note ? [note] : [],
               attachments: drafts.map(({ name, mimeType, dataBase64 }) => ({ name, mimeType, dataBase64 })),
             }
           : { texts };
@@ -2718,14 +2667,13 @@
           try {
             await state.draftPrepTail;
           } finally {
-            if (state.id === id && state.session === session) state.submitAwaitingPrep = false;
+            if (sameSession(id, session)) state.submitAwaitingPrep = false;
           }
           syncSession();
-          if (state.id !== id || state.session !== session || !state.registered) return;
+          if (!sameSession(id, session) || !state.registered) return;
         }
         const value = elements.quick.value;
-        const lines = value.split(/\r?\n/).map((text) => text.trim()).filter(Boolean);
-        void addTexts(lines, value);
+        void addTexts(splitLines(value), value);
       }
 
       function hasDraggedFiles(event) {
@@ -2746,18 +2694,13 @@
         state.dropRow = targetRow;
         if (targetRow) {
           targetRow.dataset.dropTarget = 'true';
-          if (elements.pool) delete elements.pool.dataset.dropping;
-          if (elements.dropBanner) {
-            elements.dropBanner.textContent = '松开将附件添加到此条灵感';
-            elements.dropBanner.hidden = false;
-          }
+          delete elements.pool.dataset.dropping;
+          elements.dropBanner.textContent = '松开将附件添加到此条灵感';
         } else {
-          if (elements.pool) elements.pool.dataset.dropping = 'true';
-          if (elements.dropBanner) {
-            elements.dropBanner.textContent = '松开添加附件到灵感池';
-            elements.dropBanner.hidden = false;
-          }
+          elements.pool.dataset.dropping = 'true';
+          elements.dropBanner.textContent = '松开添加附件到灵感池';
         }
+        elements.dropBanner.hidden = false;
       }
 
       elements.quick.addEventListener('compositionstart', () => { state.composing = true; });
@@ -2793,132 +2736,103 @@
         input.setRangeText(text, input.selectionStart, input.selectionEnd, 'end');
         const value = input.value;
         resize(input);
-        void addTexts(value.split(/\r\n|\r|\n/).map((line) => line.trim()).filter(Boolean), value);
+        void addTexts(splitLines(value), value);
       });
-      if (elements.attach && elements.fileInput) {
-        elements.attach.addEventListener('click', () => {
-          if (!state.registered) return;
-          elements.fileInput.value = '';
-          elements.fileInput.click?.();
-        });
-        elements.fileInput.addEventListener('change', () => {
-          const files = Array.from(elements.fileInput.files || []);
-          elements.fileInput.value = '';
-          if (files.length) void enqueueDraftFiles(files);
-        });
-      }
-      if (elements.quickSubmit) {
-        elements.quickSubmit.addEventListener('click', () => {
-          if (state.registered) void submitQuickInput();
-        });
-      }
-      if (elements.pool) {
-        elements.pool.addEventListener('dragenter', (event) => {
-          if (!state.registered || !hasDraggedFiles(event)) return;
-          event.preventDefault?.();
-          state.dragDepth += 1;
-          updateDropHover(resolveBufferingDropRow(event.target));
-        });
-        elements.pool.addEventListener('dragover', (event) => {
-          if (!state.registered || !hasDraggedFiles(event)) return;
-          event.preventDefault?.();
-          if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
-          updateDropHover(resolveBufferingDropRow(event.target));
-        });
-        elements.pool.addEventListener('dragleave', (event) => {
-          if (!state.dragDepth) return;
-          state.dragDepth = Math.max(0, state.dragDepth - 1);
-          if (state.dragDepth === 0 || !event.relatedTarget) clearDragVisuals();
-        });
-        elements.pool.addEventListener('drop', (event) => {
-          if (!state.registered || !hasDraggedFiles(event)) return;
-          event.preventDefault?.();
-          const targetRow = resolveBufferingDropRow(event.target);
-          clearDragVisuals();
-          const files = Array.from(event.dataTransfer?.files || []);
-          if (!files.length) return;
-          if (targetRow) void attachFilesToRow(targetRow, files);
-          else void enqueueDraftFiles(files);
-        });
-      }
-      if (elements.lightbox) {
-        elements.lightbox.addEventListener('click', (event) => {
-          const img = elements.lightbox.querySelector?.('.lightbox-img');
-          if (event.target !== img) closeLightbox();
-        });
-      }
+      elements.attach.addEventListener('click', () => {
+        if (!state.registered) return;
+        elements.fileInput.value = '';
+        elements.fileInput.click();
+      });
+      elements.fileInput.addEventListener('change', () => {
+        const files = Array.from(elements.fileInput.files || []);
+        elements.fileInput.value = '';
+        if (files.length) void enqueueDraftFiles(files);
+      });
+      elements.quickSubmit.addEventListener('click', () => {
+        if (state.registered) void submitQuickInput();
+      });
+      elements.pool.addEventListener('dragenter', (event) => {
+        if (!state.registered || !hasDraggedFiles(event)) return;
+        event.preventDefault();
+        state.dragDepth += 1;
+        updateDropHover(resolveBufferingDropRow(event.target));
+      });
+      elements.pool.addEventListener('dragover', (event) => {
+        if (!state.registered || !hasDraggedFiles(event)) return;
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+        updateDropHover(resolveBufferingDropRow(event.target));
+      });
+      elements.pool.addEventListener('dragleave', (event) => {
+        if (!state.dragDepth) return;
+        state.dragDepth = Math.max(0, state.dragDepth - 1);
+        if (state.dragDepth === 0 || !event.relatedTarget) clearDragVisuals();
+      });
+      elements.pool.addEventListener('drop', (event) => {
+        if (!state.registered || !hasDraggedFiles(event)) return;
+        event.preventDefault();
+        const targetRow = resolveBufferingDropRow(event.target);
+        clearDragVisuals();
+        const files = Array.from(event.dataTransfer?.files || []);
+        if (!files.length) return;
+        if (targetRow) void attachFilesToRow(targetRow, files);
+        else void enqueueDraftFiles(files);
+      });
+      elements.lightbox.addEventListener('click', (event) => {
+        if (event.target !== elements.lightboxImg) closeLightbox();
+      });
       document.addEventListener('keydown', (event) => {
         if (event.key !== 'Escape') return;
-        if (elements.lightbox && !elements.lightbox.hidden) {
-          event.preventDefault?.();
+        if (!elements.lightbox.hidden) {
+          event.preventDefault();
           closeLightbox();
         } else if (state.settingsOpen) {
-          event.preventDefault?.();
+          event.preventDefault();
           closeSettings();
         }
       });
-      if (elements.settingsToggle) {
-        elements.settingsToggle.addEventListener('click', () => {
-          if (state.settingsOpen) closeSettings();
-          else openSettings();
-        });
-      }
-      if (elements.settingsClose) {
-        elements.settingsClose.addEventListener('click', () => closeSettings());
-      }
-      if (elements.settingsBackdrop) {
-        elements.settingsBackdrop.addEventListener('click', () => closeSettings());
-      }
-      if (elements.flowUp) {
-        elements.flowUp.addEventListener('click', () => applyFlowMode('up'));
-      }
-      if (elements.flowRight) {
-        elements.flowRight.addEventListener('click', () => applyFlowMode('right'));
-      }
-      if (elements.debounceInput) {
-        elements.debounceInput.addEventListener('change', () => commitDebounceInput());
-        elements.debounceInput.addEventListener('keydown', (event) => {
-          if (event.key !== 'Enter') return;
-          event.preventDefault?.();
-          commitDebounceInput();
-        });
-      }
+      elements.settingsToggle.addEventListener('click', () => {
+        if (state.settingsOpen) closeSettings();
+        else openSettings();
+      });
+      elements.settingsClose.addEventListener('click', closeSettings);
+      elements.settingsBackdrop.addEventListener('click', closeSettings);
+      elements.flowUp.addEventListener('click', () => applyFlowMode('up'));
+      elements.flowRight.addEventListener('click', () => applyFlowMode('right'));
+      elements.debounceInput.addEventListener('change', commitDebounceInput);
+      elements.debounceInput.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        commitDebounceInput();
+      });
       for (const chip of elements.debouncePresets) {
         chip.addEventListener('click', () => {
-          const seconds = Number(chip.dataset?.debouncePreset);
+          const seconds = Number(chip.dataset.debouncePreset);
           if (Number.isInteger(seconds)) void sendSettings({ debounceSec: seconds });
         });
       }
-      if (elements.stopWait) {
-        elements.stopWait.addEventListener('change', () => {
-          void sendSettings({ stopWaitDebounce: Boolean(elements.stopWait.checked) });
+      elements.stopWait.addEventListener('change', () => {
+        void sendSettings({ stopWaitDebounce: Boolean(elements.stopWait.checked) });
+      });
+      elements.autoAttach.addEventListener('change', () => {
+        void sendSettings({ autoAttachWorkspaces: Boolean(elements.autoAttach.checked) });
+      });
+      elements.currentWsToggle.addEventListener('click', () => {
+        syncSession();
+        const ws = state.settingsData?.currentWorkspace;
+        if (!ws?.path) return;
+        const mode = ws.enabled ? 'disable' : 'enable';
+        const update = { workspaceAction: { path: ws.path, mode } };
+        if (mode === 'enable' && !state.settingsData?.sessionRegistered && state.id && workspaceReady()) {
+          update.registerCurrentSession = true;
+        }
+        void sendSettings(update);
+      });
+      elements.registerSession.addEventListener('click', () => {
+        void sendSettings({ registerCurrentSession: true }).then((data) => {
+          if (data?.sessionRegistered) closeSettings();
         });
-      }
-      if (elements.autoAttach) {
-        elements.autoAttach.addEventListener('change', () => {
-          void sendSettings({ autoAttachWorkspaces: Boolean(elements.autoAttach.checked) });
-        });
-      }
-      if (elements.currentWsToggle) {
-        elements.currentWsToggle.addEventListener('click', () => {
-          syncSession();
-          const ws = state.settingsData?.currentWorkspace;
-          if (!ws?.path) return;
-          const mode = ws.enabled ? 'disable' : 'enable';
-          const update = { workspaceAction: { path: ws.path, mode } };
-          if (mode === 'enable' && !state.settingsData?.sessionRegistered && state.id && workspaceReady()) {
-            update.registerCurrentSession = true;
-          }
-          void sendSettings(update);
-        });
-      }
-      if (elements.registerSession) {
-        elements.registerSession.addEventListener('click', () => {
-          void sendSettings({ registerCurrentSession: true }).then((data) => {
-            if (data?.sessionRegistered) closeSettings();
-          });
-        });
-      }
+      });
       elements.archive.addEventListener('click', () => {
         void mutate('archive', {}).then((result) => {
           if (result?.count) showNotice(`已归档 ${result.count} 条灵感`);
@@ -2932,7 +2846,7 @@
         const observer = new ResizeObserver(() => {
           for (const textarea of document.querySelectorAll('textarea')) resize(textarea);
         });
-        observer.observe(document.querySelector('.pool'));
+        observer.observe(elements.pool);
       }
       applyFlowMode(state.flowMode);
       setInterval(() => { if (!document.hidden) updateWaterLevels(); }, TIMER_TICK_MS);

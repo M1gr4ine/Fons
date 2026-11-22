@@ -34,7 +34,6 @@ function fixture(t) {
 }
 
 async function connect(t, appData) {
-  assert.equal(fs.existsSync(SERVER), true, 'The Fons stdio entry point must exist');
   const processEnv = { ...process.env, CODEX_HOME: appData, CODEX_THREAD_ID: FIRST };
   const child = spawn(process.execPath, [SERVER], { env: processEnv, stdio: ['pipe', 'pipe', 'pipe'] });
   const closed = once(child, 'close');

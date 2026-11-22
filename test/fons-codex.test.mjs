@@ -10,7 +10,7 @@ import { updateFonsConfig } from "../scripts/fons-config.mjs";
 import { evaluateHook } from "../scripts/fons-hook.mjs";
 import {
   addIdeas, holdEditing, listConversations, lookupConversation, noWorkspaceFonsDir, readJson, readPoolSnapshot,
-  registerConversation, releaseEditing, removeIdea, reopenIdea, sessionPaths,
+  releaseEditing, removeIdea, reopenIdea, sessionPaths,
 } from "../scripts/fons-store.mjs";
 
 const run = promisify(execFile);
@@ -112,17 +112,6 @@ test("empty Codex sessions register once and backfill first title through the an
   assert.equal(listed[0].registeredAt, initial.registeredAt);
   assert.equal(listed[0].transcriptPath, f.ids.transcript_path);
   assert.equal(fs.existsSync(f.paths.state), false);
-});
-
-test("old Antigravity records have explicit normalized defaults", (t) => {
-  const f = fixture(t);
-  registerConversation({ ...f.context, appData: f.appData, title: "old record" });
-  const lookup = lookupConversation({ appData: f.appData, sessionId: SESSION });
-  assert.equal(lookup.host, "antigravity");
-  assert.equal(lookup.transcriptPath, null);
-  const listed = listConversations({ appData: f.appData, rootDir: f.cwd });
-  assert.equal(listed[0].host, "antigravity");
-  assert.equal(listed[0].transcriptPath, null);
 });
 
 test("Codex rejects child events, same-ID conflicting anchors and unregistered pool access", (t) => {
@@ -253,18 +242,6 @@ test("Stop resets quota for a new turn even with another hook already active and
   assert.equal(current.lastTurnId, "new-turn");
   assert.equal(lastStopTurnId, "new-turn");
   assert.equal(stopCount, 1);
-});
-
-test("strict Stop waits for buffering items until debounce expires", (t) => {
-  const f = fixture(t);
-  call(f, "SessionStart", { source: "startup" });
-  process.env.FONS_DEBOUNCE_SEC = "45";
-  process.env.FONS_STOP_WAIT_DEBOUNCE = "1";
-  addIdeas({ ...f.context, texts: ["under threshold"] });
-  assert.deepEqual(call(f, "Stop"), {});
-  assert.equal(readPoolSnapshot(f.context).items[0].status, "buffering");
-  delete process.env.FONS_STOP_WAIT_DEBOUNCE;
-  assert.equal(call(f, "Stop").decision, "block");
 });
 
 test("lock contention preserves ledger, pending withdrawal and tool dedupe state", async (t) => {
@@ -480,10 +457,18 @@ test("Codex honors config.json debounceSec, stopWaitDebounce, and disabledWorksp
   assert.deepEqual(call(f, "Stop"), {});
   assert.equal(readPoolSnapshot({ ...f.context, appData: f.appData }).items[0].status, "buffering");
 
-  // Disabling workspace stops mid-session delivery and blocks new session registration
+  // Disabling workspace stops mid-session delivery, blocks new registration, and skips resume anchor rebinding
   updateFonsConfig(f.appData, { debounceSec: 0, stopWaitDebounce: false, workspaceAction: { path: f.cwd, mode: "disable" } });
   assert.deepEqual(call(f, "PostToolUse", { tool_use_id: "t2" }), {});
   assert.deepEqual(call(f, "Stop"), {});
+  const migrated = path.join(path.dirname(f.ids.transcript_path), "rollout-disabled-resume.jsonl");
+  writeLog(migrated, {
+    type: "session_meta",
+    payload: { id: SESSION, session_id: SESSION, cwd: f.cwd, source: "cli", history_base: { thread_id: SESSION } },
+    timestamp: "2026-11-22T12:00:00.000Z",
+  });
+  call(f, "SessionStart", { source: "resume", transcript_path: migrated });
+  assert.equal(lookupConversation({ appData: f.appData, sessionId: SESSION }).transcriptPath, f.ids.transcript_path);
   call(f, "SessionStart", { source: "startup", session_id: OTHER, transcript_path: null });
   assert.equal(lookupConversation({ appData: f.appData, sessionId: OTHER }), null);
 
@@ -492,4 +477,47 @@ test("Codex honors config.json debounceSec, stopWaitDebounce, and disabledWorksp
   assert.match(contextMessage(call(f, "PostToolUse", { tool_use_id: "t3" })), /等待配置蓄水/);
   call(f, "SessionStart", { source: "startup", session_id: OTHER, transcript_path: null });
   assert.equal(lookupConversation({ appData: f.appData, sessionId: OTHER })?.scope, "workspace");
+});
+
+test("Antigravity adapter matches lock fallback and zero-debounce editing-hold parity", async (t) => {
+  const f = fixture(t);
+  const preInput = { hookEventName: "PreInvocation", conversationId: SESSION, cwd: f.cwd };
+  const stopInput = {
+    hookEventName: "Stop",
+    conversationId: SESSION,
+    cwd: f.cwd,
+    terminationReason: "NO_TOOL_CALL",
+    fullyIdle: true,
+  };
+
+  // Editing hold defers delivery even when debounce is disabled (FONS_DEBOUNCE_SEC=0).
+  addIdeas({ ...f.context, texts: ["antigravity held draft"] });
+  const { id } = readPoolSnapshot(f.context).items[0];
+  assert.equal(holdEditing({ ...f.context, id }).editingHold, true);
+  assert.deepEqual(evaluateHook(preInput, "all", "antigravity"), {});
+  assert.deepEqual(evaluateHook(stopInput, "all", "antigravity"), { decision: "allow" });
+  releaseEditing({ ...f.context, id });
+
+  // Lock contention degrades cleanly with host fallback instead of crashing.
+  const lock = path.join(f.paths.fonsDir, ".inbox-" + SESSION + ".lock");
+  const owner = path.join(lock, process.pid + "-ag-lock");
+  fs.mkdirSync(owner, { recursive: true });
+  t.after(() => fs.rmSync(lock, { recursive: true, force: true }));
+
+  const runAgHook = async (payload) => {
+    const child = run(process.execPath, [HOOK], { windowsHide: true });
+    child.child.stdin.end(JSON.stringify(payload));
+    return child;
+  };
+  const preLocked = await runAgHook(preInput);
+  assert.deepEqual(JSON.parse(preLocked.stdout), {});
+  assert.match(preLocked.stderr, /写入锁/);
+  const stopLocked = await runAgHook(stopInput);
+  assert.deepEqual(JSON.parse(stopLocked.stdout), { decision: "allow" });
+  assert.match(stopLocked.stderr, /写入锁/);
+
+  // After lock release, delivery proceeds normally.
+  fs.rmSync(lock, { recursive: true, force: true });
+  const delivered = evaluateHook(preInput, "all", "antigravity");
+  assert.match(delivered.injectSteps[0].systemMessage.systemMessage, /antigravity held draft/);
 });

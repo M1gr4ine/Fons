@@ -3,15 +3,17 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { resolveConfiguredDebounceMs, workspacePathKey } from './fons-config.mjs';
 import {
-  COMPLETED_PREFIX, isCompletedLine, parseInbox, parseActiveItems, completedText,
+  COMPLETED_PREFIX, UUID_PART, activeDeliveryIds, isCompletedLine, parseInbox, completedText,
   deliveryId, deliveryIdAfterRemovingCompletion,
-  cleanAttachmentLabel, composeIdeaText, formatArchivedIdeaText, isValidStoredName, splitIdeaText,
+  cleanAttachmentLabel, composeIdeaText, formatArchivedIdeaText, formatArchivedInlineRow,
+  isValidStoredName, splitIdeaText,
 } from './fons-inbox.mjs';
 
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_ITEM_ATTACHMENTS = 8;
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID = new RegExp(`^${UUID_PART}$`, 'i');
+const ATTACHMENT_REF_RE = new RegExp(`attachments\\/(${UUID_PART})\\/([A-Za-z0-9._-]+)`, 'gi');
 const MAX_BASE64_CHARS = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + 16;
 const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const WIN_RESERVED_RE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
@@ -31,18 +33,10 @@ const MIME_BY_EXT = {
   '.txt': 'text/plain; charset=utf-8',
   '.csv': 'text/csv; charset=utf-8',
 };
-const EXT_BY_MIME = {
-  'image/png': '.png',
-  'image/jpeg': '.jpg',
-  'image/webp': '.webp',
-  'image/gif': '.gif',
-  'image/svg+xml': '.svg',
-  'application/pdf': '.pdf',
-  'application/json': '.json',
-  'text/markdown': '.md',
-  'text/plain': '.txt',
-  'text/csv': '.csv',
-};
+const EXT_BY_MIME = {};
+for (const [ext, mime] of Object.entries(MIME_BY_EXT)) {
+  EXT_BY_MIME[mime.split(';', 1)[0]] ??= ext;
+}
 const lockWait = new Int32Array(new SharedArrayBuffer(4));
 
 function invalidAttachment(message) {
@@ -50,7 +44,7 @@ function invalidAttachment(message) {
 }
 
 function isImageStoredName(storedName) {
-  return Boolean(IMAGE_MIME_BY_EXT[path.extname(String(storedName ?? '')).toLowerCase()]);
+  return Boolean(IMAGE_MIME_BY_EXT[path.extname(storedName).toLowerCase()]);
 }
 
 function mimeTypeForAttachment(storedName) {
@@ -184,32 +178,23 @@ export function readJson(filePath) {
   return value;
 }
 
-export function writeJsonAtomic(filePath, value) {
+export function writeJsonAtomic(filePath, value, options) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  writeContentsAtomic(filePath, JSON.stringify(value, null, 2));
+  writeFileAtomic(filePath, JSON.stringify(value, null, 2), options);
 }
 
-function writeContentsAtomic(filePath, content, { mode, expected } = {}) {
+function writeFileAtomic(filePath, content, { mode, expected } = {}) {
   const temporary = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
   try {
-    fs.writeFileSync(temporary, content, 'utf8');
+    if (typeof content === 'string') fs.writeFileSync(temporary, content, 'utf8');
+    else fs.writeFileSync(temporary, content);
     if (mode !== undefined) fs.chmodSync(temporary, mode);
     if (expected !== undefined && readContent(filePath) !== expected) {
       throw new Error('收件箱已变化，未确认本轮灵感：' + filePath);
     }
     fs.renameSync(temporary, filePath);
   } finally {
-    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
-  }
-}
-
-function writeBufferAtomic(filePath, buffer) {
-  const temporary = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
-  try {
-    fs.writeFileSync(temporary, buffer);
-    fs.renameSync(temporary, filePath);
-  } finally {
-    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    fs.rmSync(temporary, { force: true });
   }
 }
 
@@ -235,25 +220,36 @@ function buildStoredAttachmentName(rawName, mimeType, buffer) {
 
 function decodeAttachmentBuffer(entry) {
   if (!entry || typeof entry !== 'object') throw invalidAttachment('无效的附件数据。');
+  let buffer;
   if (Buffer.isBuffer(entry.buffer)) {
-    if (!entry.buffer.byteLength) throw invalidAttachment('附件内容不能为空。');
-    if (entry.buffer.byteLength > MAX_ATTACHMENT_BYTES) throw invalidAttachment('单个附件不能超过 10 MB。');
-    return entry.buffer;
+    buffer = entry.buffer;
+  } else {
+    const raw = typeof entry.dataBase64 === 'string' ? entry.dataBase64.trim() : '';
+    if (!raw) throw invalidAttachment('附件内容不能为空。');
+    if (raw.length > MAX_BASE64_CHARS) throw invalidAttachment('单个附件不能超过 10 MB。');
+    if (raw.length % 4 !== 0 || !BASE64_RE.test(raw)) throw invalidAttachment('无效的附件编码。');
+    buffer = Buffer.from(raw, 'base64');
   }
-  const raw = typeof entry.dataBase64 === 'string' ? entry.dataBase64.trim() : '';
-  if (!raw) throw invalidAttachment('附件内容不能为空。');
-  if (raw.length > MAX_BASE64_CHARS || raw.length % 4 !== 0 || !BASE64_RE.test(raw)) {
-    throw invalidAttachment(raw.length > MAX_BASE64_CHARS ? '单个附件不能超过 10 MB。' : '无效的附件编码。');
-  }
-  const buffer = Buffer.from(raw, 'base64');
   if (!buffer.byteLength) throw invalidAttachment('附件内容不能为空。');
   if (buffer.byteLength > MAX_ATTACHMENT_BYTES) throw invalidAttachment('单个附件不能超过 10 MB。');
   return buffer;
 }
 
-function persistIncomingAttachments(attachmentsDir, incoming = []) {
+function removeEmptyDirectory(dir) {
+  try { fs.rmdirSync(dir); }
+  catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error; }
+}
+
+function rollbackCreatedAttachments(attachmentsDir, newlyCreated) {
+  if (!newlyCreated.length) return;
+  for (const created of newlyCreated) fs.rmSync(created, { force: true });
+  removeEmptyDirectory(attachmentsDir);
+  removeEmptyDirectory(path.dirname(attachmentsDir));
+}
+
+function persistIncomingAttachments(attachmentsDir, incoming) {
   if (!incoming.length) return { saved: [], newlyCreated: [] };
-  if (!Array.isArray(incoming) || incoming.length > MAX_ITEM_ATTACHMENTS) {
+  if (incoming.length > MAX_ITEM_ATTACHMENTS) {
     throw invalidAttachment(`单条灵感最多添加 ${MAX_ITEM_ATTACHMENTS} 个附件。`);
   }
   const prepared = incoming.map((entry) => {
@@ -268,32 +264,26 @@ function persistIncomingAttachments(attachmentsDir, incoming = []) {
     for (const { name, storedName, buffer } of prepared) {
       const target = path.join(attachmentsDir, storedName);
       if (!fs.existsSync(target)) {
-        writeBufferAtomic(target, buffer);
+        writeFileAtomic(target, buffer);
         newlyCreated.push(target);
       }
       saved.push({ name, storedName });
     }
     return { saved, newlyCreated };
   } catch (error) {
-    for (const created of newlyCreated) fs.rmSync(created, { force: true });
+    rollbackCreatedAttachments(attachmentsDir, newlyCreated);
     throw error;
   }
 }
 
 function collectReferencedAttachments(content, sessionId, target = new Set()) {
   if (!content) return target;
-  const pattern = /attachments\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/([A-Za-z0-9._-]+)/gi;
-  for (const match of content.matchAll(pattern)) {
+  for (const match of content.matchAll(ATTACHMENT_REF_RE)) {
     if (match[1].toLowerCase() === sessionId.toLowerCase() && isValidStoredName(match[2])) {
       target.add(match[2]);
     }
   }
   return target;
-}
-
-function removeEmptyDirectory(dir) {
-  try { fs.rmdirSync(dir); }
-  catch (error) { if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(error.code)) throw error; }
 }
 
 function pruneUnreferencedAttachments(paths, sessionId, { content, archive, state }) {
@@ -347,7 +337,7 @@ function publishConversation(filePath, entry) {
     try { fs.linkSync(temporary, filePath); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
   } finally {
-    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    fs.rmSync(temporary, { force: true });
   }
   return readJson(filePath);
 }
@@ -400,6 +390,7 @@ function updateConversation({ appData, sessionId }, change) {
   const filePath = indexPath(appData, sessionId);
   if (!fs.existsSync(filePath) || !change(readJson(filePath))) return;
   withPoolWrite({ fonsDir: path.dirname(filePath), sessionId }, () => {
+    if (!fs.existsSync(filePath)) return;
     const entry = readJson(filePath);
     const changed = change(entry);
     if (!changed) return;
@@ -418,7 +409,7 @@ export function backfillConversationTitle({ appData, sessionId, title, transcrip
 }
 
 export function bindConversationTranscript({
-  appData, sessionId, transcriptPath, expectedTranscriptPath = null, host = 'codex',
+  appData, sessionId, transcriptPath, expectedTranscriptPath = null, host,
 }) {
   updateConversation({ appData, sessionId }, (entry) => {
     if (entry.host !== host || (entry.transcriptPath ?? null) !== expectedTranscriptPath) return null;
@@ -500,8 +491,8 @@ function enrichAttachments(parsed, attachmentsDir) {
 }
 
 function makeItems(content, archive, state, ui, sessionId, attachmentsDir) {
-  const rows = parseInbox(content).rows;
-  const active = new Map(parseActiveItems(content, archive).map((item) => [item.text, item.id]));
+  const { rows, activeItems } = parseInbox(content);
+  const active = activeDeliveryIds(rows, activeItems, archive);
   const items = [];
   for (const [rowIndex, row] of rows.entries()) {
     if (row.receipt || !row.body.trim() || row.body.trimStart().startsWith('#')) continue;
@@ -515,14 +506,18 @@ function makeItems(content, archive, state, ui, sessionId, attachmentsDir) {
   return { rows, items };
 }
 
-function fileEtag(filePath) {
-  try { const stat = fs.statSync(filePath); return `${stat.mtimeMs}:${stat.size}`; }
-  catch (error) { if (error.code === 'ENOENT') return '-'; throw error; }
+function statOptional(filePath) {
+  return fs.statSync(filePath, { throwIfNoEntry: false }) ?? null;
+}
+
+function formatEtag(stat) {
+  return stat ? `${stat.mtimeMs}:${stat.size}` : '-';
 }
 
 export function readPoolData({ rootDir, fonsDir, sessionId }) {
   const paths = sessionPaths({ rootDir, fonsDir, sessionId });
-  const baseEtag = [paths.ideas, paths.state, paths.ui, paths.archive].map(fileEtag).join('|');
+  const stats = [paths.ideas, paths.state, paths.ui, paths.archive].map(statOptional);
+  const baseEtag = stats.map(formatEtag).join('|');
   // Withdrawal metadata is published after deletion. Read it first so it can't revive a stale row.
   const ui = readJson(paths.ui);
   const content = readContent(paths.ideas);
@@ -531,17 +526,10 @@ export function readPoolData({ rootDir, fonsDir, sessionId }) {
   const { rows, items } = makeItems(content, archive, state, ui, sessionId, paths.attachmentsDir);
   const attTag = items.flatMap((item) => item.attachments.map((att) => `${att.storedName}:${att.missing ? 'x' : att.size}`)).join(',');
   const etag = attTag ? `${baseEtag}|att:${attTag}` : baseEtag;
-  let mtimeMs = 0;
-  try { mtimeMs = fs.statSync(paths.ideas).mtimeMs; }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
-  return { paths, content, archive, state, ui, rows, items, etag, mtimeMs };
+  return { paths, content, archive, state, ui, rows, items, etag, mtimeMs: stats[0]?.mtimeMs ?? 0 };
 }
 
 const HOLD_LEASE_MS = 15000;
-
-export function resolveDebounceMs(appData = null) {
-  return resolveConfiguredDebounceMs({ appData });
-}
 
 function resolveItemSince(id, state, ui, mtimeMs) {
   const limit = mtimeMs + 1000;
@@ -562,18 +550,17 @@ function itemHoldStatus(timer, since, now) {
   return { editingHold: active && now < timer.holdUntil, pausedMs };
 }
 
-function evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now, editingHoldPolicy }) {
+function evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now }) {
   const since = resolveItemSince(item.id, state, ui, mtimeMs);
-  const timer = ui.timers?.[item.id];
-  const respectsHold = debounceMs > 0 || editingHoldPolicy === 'always';
-  const hold = respectsHold ? itemHoldStatus(timer, since, now) : { editingHold: false, pausedMs: 0 };
+  const hold = itemHoldStatus(ui.timers?.[item.id], since, now);
   const elapsedMs = Math.max(0, now - since - hold.pausedMs);
   const remainingMs = debounceMs > 0 ? Math.max(0, debounceMs - elapsedMs) : 0;
   return { since, remainingMs, editingHold: hold.editingHold, pausedMs: hold.pausedMs };
 }
 
 export function computeDebounce({
-  items, state, ui, mtimeMs, appData = null, debounceMs = resolveDebounceMs(appData), now = Date.now(), editingHoldPolicy,
+  items, state, ui, mtimeMs, appData = null,
+  debounceMs = resolveConfiguredDebounceMs({ appData }), now = Date.now(),
 }) {
   const uniqueItems = new Map();
   for (const item of items) {
@@ -583,7 +570,7 @@ export function computeDebounce({
   const ready = [];
   const pendingAt = {};
   for (const item of uniqueItems.values()) {
-    const info = evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now, editingHoldPolicy });
+    const info = evaluatePendingItem(item, { state, ui, mtimeMs, debounceMs, now });
     pendingAt[item.id] = info.since;
     byId.set(item.id, info);
     if (info.remainingMs <= 0 && !info.editingHold) ready.push(item);
@@ -623,7 +610,8 @@ const stampExistingPoolTimers = poolWriter(({ rootDir, fonsDir, sessionId, fresh
 });
 
 export function readPoolSnapshot({
-  rootDir, fonsDir, sessionId, appData = null, debounceMs = resolveDebounceMs(appData), now = Date.now(),
+  rootDir, fonsDir, sessionId, appData = null,
+  debounceMs = resolveConfiguredDebounceMs({ appData }), now = Date.now(),
 }) {
   const data = readPoolData({ rootDir, fonsDir, sessionId });
   const timing = computeDebounce({ ...data, debounceMs, now });
@@ -641,11 +629,12 @@ export function readPoolSnapshot({
 }
 
 export const addIdeas = poolWriter(({ rootDir, fonsDir, sessionId, texts = [], attachments = [] }) => {
+  if (!Array.isArray(attachments)) throw invalidAttachment('无效的附件列表。');
   const paths = sessionPaths({ rootDir, fonsDir, sessionId });
   const clean = texts
     .map((text) => String(text).replace(/[\r\n]+/g, ' ').trim().replace(/^[-*]\s*\[\s*\]\s*/, '').trim())
     .filter(Boolean);
-  if (!attachments?.length) {
+  if (!attachments.length) {
     if (!clean.length) return { count: 0, texts: [] };
     appendLinesWithNewline(paths.ideas, clean.map((text) => `- [ ] ${text}`));
     return { count: clean.length, texts: clean };
@@ -657,13 +646,13 @@ export const addIdeas = poolWriter(({ rootDir, fonsDir, sessionId, texts = [], a
   try {
     appendLinesWithNewline(paths.ideas, composed.map((text) => `- [ ] ${text}`));
   } catch (error) {
-    for (const created of newlyCreated) fs.rmSync(created, { force: true });
+    rollbackCreatedAttachments(paths.attachmentsDir, newlyCreated);
     throw error;
   }
   return { count: composed.length, texts: composed };
 });
 
-export const completeIdea = poolWriter(({ rootDir, fonsDir, sessionId, token, tokens = [token] }) => {
+export const completeIdea = poolWriter(({ rootDir, fonsDir, sessionId, token, tokens = token === undefined ? [] : [token] }) => {
   if (!tokens.length) throw new Error('请先运行 fons list，再指定已处理条目的令牌。');
   if (new Set(tokens).size !== tokens.length) throw new Error('确认令牌重复。');
   const data = readPoolData({ rootDir, fonsDir, sessionId });
@@ -689,7 +678,7 @@ export function completeAcknowledgedIdeas(data, ids) {
     replacements.set(rowIndex, COMPLETED_PREFIX + text + row.raw.slice(row.body.length));
   }
   try {
-    writeContentsAtomic(file, foldedRows(data, replacements), {
+    writeFileAtomic(file, foldedRows(data, replacements), {
       mode: writableFileMode(file), expected: data.content,
     });
   } catch (error) {
@@ -753,17 +742,23 @@ export const updateIdeaText = poolWriter(({
   if (!item) return { conflict: true };
   if (item.status !== 'buffering') return { conflict: true, locked: true };
   const kept = resolveKeptAttachments(item, keepAttachments);
-  const incomingCount = Array.isArray(newAttachments) ? newAttachments.length : 0;
-  if (kept.length + incomingCount > MAX_ITEM_ATTACHMENTS) {
+  if (!Array.isArray(newAttachments)) throw invalidAttachment('无效的附件列表。');
+  if (kept.length + newAttachments.length > MAX_ITEM_ATTACHMENTS) {
     throw invalidAttachment(`单条灵感最多添加 ${MAX_ITEM_ATTACHMENTS} 个附件。`);
   }
   const cleanNote = String(newText ?? '').replace(/[\r\n]+/g, ' ').trim();
-  if (!cleanNote && !kept.length && !incomingCount) throw new Error('灵感内容不能为空。');
-  const { saved } = persistIncomingAttachments(data.paths.attachmentsDir, newAttachments);
+  if (!cleanNote && !kept.length && !newAttachments.length) throw new Error('灵感内容不能为空。');
+  const { saved, newlyCreated } = persistIncomingAttachments(data.paths.attachmentsDir, newAttachments);
   const composed = composeIdeaText(cleanNote, [...kept, ...saved], sessionId);
   const eol = data.rows[rowIndex].raw.slice(data.rows[rowIndex].body.length);
   const next = foldedRows(data, new Map([[rowIndex, `- [ ] ${composed}${eol}`]]));
-  const result = replaceIdea(data, item, next);
+  let result;
+  try {
+    result = replaceIdea(data, item, next);
+  } catch (error) {
+    rollbackCreatedAttachments(data.paths.attachmentsDir, newlyCreated);
+    throw error;
+  }
   if (result.conflict) {
     pruneUnreferencedAttachments(data.paths, sessionId, {
       content: readContent(data.paths.ideas), archive: data.archive, state: data.state,
@@ -857,15 +852,18 @@ export const reopenIdea = poolWriter(({ rootDir, fonsDir, sessionId, rowIndex, e
   return result;
 });
 
+function clearItemTimer(data, id) {
+  if (!data.ui.timers?.[id]) return;
+  delete data.ui.timers[id];
+  if (!Object.keys(data.ui.timers).length) delete data.ui.timers;
+  writeJsonAtomic(data.paths.ui, data.ui);
+}
+
 export const holdEditing = poolWriter(({ rootDir, fonsDir, sessionId, id, now = Date.now() }) => {
   const data = readPoolData({ rootDir, fonsDir, sessionId });
   const target = data.items.find((item) => item.id === id && item.status === 'buffering');
   if (!target) {
-    if (data.ui.timers?.[id]) {
-      delete data.ui.timers[id];
-      if (!Object.keys(data.ui.timers).length) delete data.ui.timers;
-      writeJsonAtomic(data.paths.ui, data.ui);
-    }
+    clearItemTimer(data, id);
     return { editingHold: false };
   }
   const since = resolveItemSince(id, data.state, data.ui, data.mtimeMs || now);
@@ -884,9 +882,7 @@ export const releaseEditing = poolWriter(({ rootDir, fonsDir, sessionId, id, now
   if (!current) return { editingHold: false };
   const target = data.items.find((item) => item.id === id && item.status === 'buffering');
   if (!target) {
-    delete data.ui.timers[id];
-    if (!Object.keys(data.ui.timers).length) delete data.ui.timers;
-    writeJsonAtomic(data.paths.ui, data.ui);
+    clearItemTimer(data, id);
     return { editingHold: false };
   }
   const since = resolveItemSince(id, data.state, data.ui, data.mtimeMs || now);
@@ -895,14 +891,6 @@ export const releaseEditing = poolWriter(({ rootDir, fonsDir, sessionId, id, now
   writeJsonAtomic(data.paths.ui, data.ui);
   return { editingHold: false, id };
 });
-
-function formatArchivedInlineRow(body, sessionId) {
-  const extracted = completedText(body);
-  if (!extracted || !splitIdeaText(extracted, sessionId).attachments.length) return body;
-  const prefixMatch = /^\s*(?:(?:[-*]\s*)?(?:\[\s*[√✓✔]\s*\]|【\s*[√✓✔]\s*】|[√✓✔])|[-*]\s*\[\s*[xX]\s*\])\s*/.exec(body);
-  const prefix = prefixMatch ? prefixMatch[0] : COMPLETED_PREFIX;
-  return `${prefix}${formatArchivedIdeaText(extracted, sessionId)}`;
-}
 
 function archiveRows(rows, doneByIndex = new Map(), sessionId) {
   const done = [];

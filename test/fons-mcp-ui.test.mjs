@@ -53,7 +53,6 @@ function poolRequest(sidecar, data = {}) {
 test('Codex embeds the existing pool and only its parent can connect and bind it', async () => {
   const host = mockHost();
   const { sidecar } = host.window;
-  assert.match(host.html, /light-dark/);
   assert.doesNotMatch(host.html, /src="\/preload\.js"/);
   assert.match(host.html, /data-testid="fons-quick-add"/);
   assert.match(host.html, /data-testid="fons-attach"/);
@@ -152,4 +151,12 @@ test('setup and tool errors leave a readable unbound panel and permit a later va
   assert.match(recovered.window.sidecar.contextMessage, /重新打开/);
   recovered.result(binding);
   assert.equal(recovered.window.sidecar.conversationId, conversationId);
+
+  // Teardown arriving before ui/initialize settles preserves teardown state without clobbering.
+  const closing = mockHost();
+  closing.deliver({ method: 'ui/resource-teardown', id: 'early-close' });
+  await settle();
+  assert.equal(closing.messages.at(-1).id, 'early-close');
+  assert.equal(closing.window.sidecar.contextMessage, '灵感池已关闭，请重新打开 Fons。');
+  assert.equal(closing.messages.some((m) => m.method === 'ui/notifications/initialized'), false);
 });

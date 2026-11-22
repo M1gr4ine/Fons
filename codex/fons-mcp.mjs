@@ -5,8 +5,10 @@ import { pathToFileURL } from 'node:url';
 import { codexAppData } from '../adapters/codex.mjs';
 import { isValidSessionId, lookupConversation } from '../scripts/fons-store.mjs';
 import {
-  POOL_BODY_LIMIT, POOL_TOKEN_PATTERN, POOL_UPLOAD_LIMIT, POOL_UPLOAD_ROUTES, createBoundPoolRoutes,
+  POOL_BODY_LIMIT, POOL_TOKEN_PATTERN, POOL_UPLOAD_LIMIT, POOL_UPLOAD_ROUTES,
+  createBoundPoolRoutes, isPlainObject,
 } from '../sidecars/fons-pool/main.mjs';
+import { readFonsMcpUi } from './fons-mcp-ui.mjs';
 
 const UI_URI = 'ui://fons/pool.html';
 const UI_MIME = 'text/html;profile=mcp-app';
@@ -60,14 +62,10 @@ const tools = [
   },
 ];
 
-function isObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
 function threadIdFromMeta(meta) {
   // Codex injects the originating thread ID into request metadata. The distinct
   // sessionId identifies an agent family and does not select a pool.
-  const threadId = isObject(meta) ? meta.threadId : undefined;
+  const threadId = isPlainObject(meta) ? meta.threadId : undefined;
   return isValidSessionId(threadId) ? threadId : null;
 }
 
@@ -95,7 +93,7 @@ function readRouteResult(result) {
 }
 
 function openPanel({ appData, panels }, args, threadId) {
-  if (!isObject(args) || Object.keys(args).length) return openError('打开面板无需提供任何参数。');
+  if (!isPlainObject(args) || Object.keys(args).length) return openError('打开面板无需提供任何参数。');
   if (!threadId) return openError('Codex 未提供当前会话身份，请在 Codex 桌面会话中打开 Fons。');
   const entry = lookupConversation({ appData, sessionId: threadId });
   if (entry?.host !== 'codex') {
@@ -114,9 +112,9 @@ function openPanel({ appData, panels }, args, threadId) {
 }
 
 function validRouteArgs(args) {
-  return isObject(args) && Object.keys(args).length === 3 &&
+  return isPlainObject(args) && Object.keys(args).length === 3 &&
     typeof args.token === 'string' && POOL_TOKEN_PATTERN.test(args.token) &&
-    typeof args.path === 'string' && isObject(args.data);
+    typeof args.path === 'string' && isPlainObject(args.data);
 }
 
 function runPoolRoute(panels, args, threadId) {
@@ -156,14 +154,13 @@ function initialize({ protocolVersion }) {
   };
 }
 
-async function readResource({ uri }) {
+function readResource({ uri }) {
   if (uri !== UI_URI) return rpcError(-32602, '未知的 Fons 面板资源。');
-  const { readFonsMcpUi } = await import('./fons-mcp-ui.mjs');
   const content = { uri, mimeType: UI_MIME, text: readFonsMcpUi(), _meta: UI_OPTIONS };
   return { result: { contents: [content] } };
 }
 
-async function dispatch(context, method, params) {
+function dispatch(context, method, params) {
   switch (method) {
     case 'initialize': return { result: initialize(params) };
     case 'ping': return { result: {} };
@@ -188,23 +185,23 @@ function parseFrame(frame) {
 function validRequest({ jsonrpc, id, method, params }) {
   const validId = id === undefined || typeof id === 'string' || Number.isSafeInteger(id);
   return jsonrpc === '2.0' && validId && typeof method === 'string' &&
-    (params === undefined || isObject(params));
+    (params === undefined || isPlainObject(params));
 }
 
-async function respond(context, frame) {
+function respond(context, frame) {
   const parsed = parseFrame(frame);
   if (parsed.error) return { id: null, ...parsed };
   const { message } = parsed;
-  if (!isObject(message) || !validRequest(message)) {
+  if (!isPlainObject(message) || !validRequest(message)) {
     return { id: null, ...rpcError(-32600, '无效的 Fons MCP 请求。') };
   }
   const { id, method, params = {} } = message;
   if (id === undefined) return null;
 
   try {
-    return { id, ...await dispatch(context, method, params) };
+    return { id, ...dispatch(context, method, params) };
   } catch (error) {
-    stderr.write('[FONS] MCP 请求处理失败。' + (error.code ? ' ' + error.code : '') + '\n');
+    stderr.write('[FONS] MCP 请求处理失败。' + (error?.code ? ' ' + error.code : '') + '\n');
     return { id, ...rpcError(-32603, '无法完成 Fons MCP 请求。') };
   }
 }
@@ -245,7 +242,7 @@ async function* readFrames(input) {
 
 const context = { appData: codexAppData(), panels: new Map() };
 for await (const frame of readFrames(stdin)) {
-  const response = await respond(context, frame);
+  const response = respond(context, frame);
   if (response && !stdout.write(JSON.stringify({ jsonrpc: '2.0', ...response }) + '\n')) {
     await once(stdout, 'drain');
   }

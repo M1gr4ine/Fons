@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import {
   lookupConversation, registerConversation, sessionPaths,
 } from '../scripts/fons-store.mjs';
-import { mountPoolRoutes } from '../sidecars/fons-pool/main.mjs';
+import { createBoundPoolRoutes } from '../sidecars/fons-pool/main.mjs';
 
 const SESSION = '12345678-1234-7234-8234-123456789aaa';
 const OTHER = '12345678-1234-7234-8234-123456789bbb';
@@ -25,13 +25,8 @@ function setup(t, scope = 'workspace') {
 }
 
 function mount(ctx, boundSession = ctx.boundSession) {
-  const routes = new Map();
-  const app = {
-    page() {},
-    api(url, handler, method) { routes.set(method + ' ' + url, handler); },
-  };
-  mountPoolRoutes(app, ctx.appData, { boundSession });
-  return (action = '', data = {}) => routes.get('POST /api/pool' + (action ? '/' + action : ''))(data);
+  const routes = createBoundPoolRoutes(boundSession);
+  return (action = '', data = {}) => routes.get('/api/pool' + (action ? '/' + action : ''))(data);
 }
 
 function writeAttachment(paths, name = ATTACHMENT) {
