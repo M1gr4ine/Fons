@@ -135,7 +135,18 @@ function createFakeHost({ env, sessionId, cwd, surfaces = ['desktop'], runProces
     }
   };
 
-  const uiFactory = (type) => (props = {}) => ({ type, props });
+  const supportedProps = {
+    Box: ['key', 'children', 'flexDirection', 'justifyContent', 'flexWrap', 'gap', 'paddingX', 'marginBottom', 'marginTop', 'borderStyle', 'borderColor'],
+    Text: ['key', 'children', 'color', 'bold', 'dimColor', 'wrap'],
+    Button: ['key', 'label', 'plain', 'variant', 'dimColor', 'onPress'],
+    Input: ['key', 'label', 'placeholder', 'submitLabel', 'autoFocus', 'value', 'onInput', 'onSubmit'],
+  };
+  const uiFactory = (type) => (props = {}) => {
+    for (const prop of Object.keys(props)) {
+      assert.ok(supportedProps[type].includes(prop), type + ' does not support ' + prop);
+    }
+    return { type, props };
+  };
   const uiTable = {
     Box: uiFactory('Box'),
     Text: uiFactory('Text'),
@@ -668,4 +679,246 @@ test('Claude Mod pane respects openAtStart off, non-desktop surfaces, and inline
   await terminalHost.waitUntil(() => !terminalHost.openPanes.has('fons-pool'));
   assert.equal(terminalHost.openPanes.has('fons-pool'), false);
   assert.equal(renderText(inlineTree), '');
+});
+
+test('native pane keeps quick entry and attachment editing together on both surfaces', async (t) => {
+  const ctx = setupEnv(t);
+  prepareClaudePlugin({ env: ctx.env, cwd: ctx.project });
+  registerSession(ctx);
+  addIdeas({
+    rootDir: ctx.project, sessionId: ctx.sessionId, texts: ['原始灵感'],
+    attachments: [
+      { name: 'first.txt', buffer: Buffer.from('first') },
+      { name: 'second.txt', buffer: Buffer.from('second') },
+    ],
+  });
+  const host = createFakeHost({ env: ctx.env, sessionId: ctx.sessionId, cwd: ctx.project });
+  register(host.on, { openAtStart: 'off' });
+  await host.dispatch('session.start', { surface: 'desktop' });
+  await host.dispatch('command.run', { command: 'fons', args: 'open' });
+
+  for (const surface of ['desktop', 'terminal']) {
+    const tree = await host.renderPane(surface);
+    assert.match(renderText(tree), /first\.txt/);
+    assert.match(renderText(tree), /second\.txt/);
+    assert.ok(findNode(tree, (n) => n.type === 'Button' && n.props.key === 'edit-0'));
+  }
+  await findNode(await host.renderPane(), (n) => n.type === 'Button' && n.props.key === 'edit-0').props.onPress();
+  let tree = await host.renderPane();
+  const items = findNode(tree, (n) => n.type === 'Box' && n.props.key === 'items');
+  const editingRow = findNode(items, (n) => n.type === 'Box' && n.props.key === 'edit-box');
+  assert.ok(findNode(editingRow, (n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-')));
+  assert.ok(findNode(tree, (n) => n.type === 'Input' && String(n.props.key).startsWith('draft-')));
+  const removeButtons = collectNodes(editingRow).filter((n) => n.type === 'Button' && String(n.props.key).startsWith('remove-attachment-'));
+  assert.equal(removeButtons.length, 2);
+  await removeButtons[0].props.onPress();
+  tree = await host.renderPane();
+  await findNode(tree, (n) => n.type === 'Input' && String(n.props.key).startsWith('draft-')).props.onSubmit('编辑期间速记');
+  tree = await host.renderPane();
+  assert.match(renderText(tree), /编辑期间速记/);
+  assert.ok(findNode(tree, (n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-')));
+  await findNode(tree, (n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-')).props.onSubmit('编辑后的灵感');
+  const snapshot = await createBridgeCaller(ctx)('snapshot', { sessionId: ctx.sessionId });
+  const saved = snapshot.items.find((item) => item.note === '编辑后的灵感');
+  assert.equal(saved.attachments.length, 1);
+  assert.equal(saved.attachments[0].name, 'second.txt');
+  assert.ok(snapshot.items.some((item) => item.note === '编辑期间速记'));
+
+  tree = await host.renderPane();
+  await findNode(tree, (n) => n.type === 'Button' && n.props.key === 'edit-0').props.onPress();
+  tree = await host.renderPane();
+  await findNode(tree, (n) => n.type === 'Button' && String(n.props.key).startsWith('remove-attachment-')).props.onPress();
+  tree = await host.renderPane();
+  const editInput = findNode(tree, (n) => n.type === 'Input' && String(n.props.key).startsWith('edit-input-'));
+  await editInput.props.onSubmit('  ');
+  assert.ok(host.toasts.some((message) => message.includes('不能为空')));
+  await editInput.props.onSubmit('保留文字');
+  const afterRemovingAll = await createBridgeCaller(ctx)('snapshot', { sessionId: ctx.sessionId });
+  assert.equal(afterRemovingAll.items.find((item) => item.note === '保留文字').attachments.length, 0);
+});
+
+test('quick entry preserves text after failure and keeps a newer draft during submission', async (t) => {
+  const ctx = setupEnv(t);
+  prepareClaudePlugin({ env: ctx.env, cwd: ctx.project });
+  registerSession(ctx);
+  let rejectAdd = true;
+  const host = createFakeHost({
+    env: ctx.env, sessionId: ctx.sessionId, cwd: ctx.project,
+    runProcess: (argv, init, fallback) => {
+      if (rejectAdd && JSON.parse(init.env.FONS_BRIDGE_INPUT).op === 'add') {
+        return { exitCode: 1, stdout: JSON.stringify({ ok: false, error: '写入失败' }) };
+      }
+      return fallback(argv, init);
+    },
+  });
+  register(host.on, { openAtStart: 'off' });
+  await host.dispatch('command.run', { command: 'fons', args: 'open' });
+  const draftInput = async () => findNode(await host.renderPane(), (node) => node.type === 'Input');
+  await (await draftInput()).props.onSubmit('第一条');
+  const retained = await draftInput();
+  assert.equal(retained.props.value, '第一条');
+  assert.ok(host.toasts.includes('写入失败'));
+  rejectAdd = false;
+  const saving = retained.props.onSubmit(retained.props.value);
+  retained.props.onInput('第二条');
+  await saving;
+  assert.equal((await draftInput()).props.value, '第二条');
+  assert.match(renderText(await host.renderPane()), /第一条/);
+});
+
+test('native pane shows pending feedback and ignores repeated action on the same row', async (t) => {
+  const ctx = setupEnv(t);
+  prepareClaudePlugin({ env: ctx.env, cwd: ctx.project });
+  registerSession(ctx);
+  addIdeas({ rootDir: ctx.project, sessionId: ctx.sessionId, texts: ['等待完成', '另一条'] });
+  let release;
+  let markStarted;
+  let completeCalls = 0;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  t.after(() => release());
+  const host = createFakeHost({
+    env: ctx.env, sessionId: ctx.sessionId, cwd: ctx.project,
+    runProcess: async (argv, init, fallback) => {
+      const payload = JSON.parse(init.env.FONS_BRIDGE_INPUT);
+      if (argv[2] === 'pool' && payload.op === 'complete') {
+        completeCalls += 1;
+        markStarted();
+        await blocked;
+      }
+      return fallback(argv, init);
+    },
+  });
+  register(host.on, { openAtStart: 'off' });
+  await host.dispatch('session.start', { surface: 'desktop' });
+  await host.dispatch('command.run', { command: 'fons', args: 'open' });
+  const tree = await host.renderPane();
+  const done = findNode(tree, (n) => n.type === 'Button' && n.props.key === 'done-0');
+  const first = done.props.onPress();
+  await started;
+  const pendingTree = await host.renderPane();
+  const pendingRow = findNode(pendingTree, (n) => n.type === 'Box' && String(n.props.key).startsWith('item-0-'));
+  assert.match(renderText(pendingRow), /处理中/);
+  assert.equal(findNode(pendingRow, (n) => n.type === 'Button' && n.props.key === 'done-0'), undefined);
+  assert.ok(findNode(pendingTree, (n) => n.type === 'Button' && n.props.key === 'done-1'));
+  const second = done.props.onPress();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(completeCalls, 1);
+  release();
+  await Promise.all([first, second]);
+  const snapshot = await createBridgeCaller(ctx)('snapshot', { sessionId: ctx.sessionId });
+  assert.equal(snapshot.items.filter((item) => item.status === 'done').length, 1);
+});
+
+test('native pane collapses completed items and resets the group after archive', async (t) => {
+  const ctx = setupEnv(t);
+  prepareClaudePlugin({ env: ctx.env, cwd: ctx.project });
+  registerSession(ctx);
+  addIdeas({ rootDir: ctx.project, sessionId: ctx.sessionId, texts: ['保留活跃', '完成一', '完成二', '完成三'] });
+  const bridge = createBridgeCaller(ctx);
+  let snapshot = await bridge('snapshot', { sessionId: ctx.sessionId });
+  for (const item of snapshot.items.slice(1)) {
+    await bridge('pool', { sessionId: ctx.sessionId, op: 'complete', data: { token: item.token } });
+  }
+  const host = createFakeHost({ env: ctx.env, sessionId: ctx.sessionId, cwd: ctx.project });
+  register(host.on, { openAtStart: 'off' });
+  await host.dispatch('session.start', { surface: 'desktop' });
+  await host.dispatch('command.run', { command: 'fons', args: 'open' });
+  let tree = await host.renderPane();
+  assert.doesNotMatch(renderText(tree), /完成一/);
+  await findNode(tree, (n) => n.type === 'Button' && n.props.key === 'toggle-done').props.onPress();
+  tree = await host.renderPane();
+  assert.match(renderText(tree), /完成一/);
+  await findNode(tree, (n) => n.type === 'Button' && n.props.key === 'archive').props.onPress();
+  tree = await host.renderPane();
+  assert.doesNotMatch(renderText(tree), /完成一/);
+  await findNode(tree, (n) => n.type === 'Button' && n.props.key === 'done-0').props.onPress();
+  tree = await host.renderPane();
+  assert.match(renderText(tree), /保留活跃/);
+});
+
+test('native settings save custom debounce and workspace defaults, and register current session', async (t) => {
+  const ctx = setupEnv(t);
+  prepareClaudePlugin({ env: ctx.env, cwd: ctx.project });
+  const host = createFakeHost({ env: ctx.env, sessionId: ctx.sessionId, cwd: ctx.project });
+  register(host.on, { openAtStart: 'off' });
+  await host.dispatch('session.start', { surface: 'desktop' });
+  await host.dispatch('command.run', { command: 'fons', args: 'open' });
+  let tree = await host.renderPane();
+  await findNode(tree, (n) => n.type === 'Button' && n.props.key === 'register-session').props.onPress();
+  tree = await host.renderPane();
+  assert.ok(findNode(tree, (n) => n.type === 'Input' && String(n.props.key).startsWith('draft-')));
+  await findNode(tree, (n) => n.type === 'Button' && n.props.key === 'settings').props.onPress();
+  tree = await host.renderPane();
+  await findNode(tree, (n) => n.type === 'Input' && n.props.key === 'debounce-input').props.onSubmit('23');
+  tree = await host.renderPane();
+  assert.match(renderText(tree), /23s/);
+  let snapshot = await createBridgeCaller(ctx)('snapshot', { sessionId: ctx.sessionId });
+  assert.equal(snapshot.settings.config.debounceSec, 23);
+  await findNode(tree, (n) => n.type === 'Input' && n.props.key === 'debounce-input').props.onSubmit('3601');
+  assert.ok(host.toasts.some((message) => message.includes('0–3600')));
+  snapshot = await createBridgeCaller(ctx)('snapshot', { sessionId: ctx.sessionId });
+  assert.equal(snapshot.settings.config.debounceSec, 23);
+  await findNode(tree, (n) => n.type === 'Input' && n.props.key === 'debounce-input').props.onSubmit('3600');
+  snapshot = await createBridgeCaller(ctx)('snapshot', { sessionId: ctx.sessionId });
+  assert.equal(snapshot.settings.config.debounceSec, 3600);
+  tree = await host.renderPane();
+  const before = snapshot.settings.config.autoAttachWorkspaces;
+  await findNode(tree, (n) => n.type === 'Button' && n.props.key === 'toggle-auto-attach').props.onPress();
+  snapshot = await createBridgeCaller(ctx)('snapshot', { sessionId: ctx.sessionId });
+  assert.equal(snapshot.settings.config.autoAttachWorkspaces, !before);
+  tree = await host.renderPane();
+  await findNode(tree, (n) => n.type === 'Button' && n.props.key === 'toggle-ws').props.onPress();
+  tree = await host.renderPane();
+  await findNode(tree, (n) => n.type === 'Button' && n.props.key === 'reset-ws').props.onPress();
+  snapshot = await createBridgeCaller(ctx)('snapshot', { sessionId: ctx.sessionId });
+  assert.equal(snapshot.settings.currentWorkspace.explicitState, 'default');
+});
+
+test('poll skips unchanged snapshots without resetting countdown and refreshes changed status', async (t) => {
+  const ctx = setupEnv(t);
+  prepareClaudePlugin({ env: ctx.env, cwd: ctx.project });
+  registerSession(ctx);
+  addIdeas({ rootDir: ctx.project, sessionId: ctx.sessionId, texts: ['等待到期'] });
+  let polls = 0;
+  const host = createFakeHost({
+    env: ctx.env, sessionId: ctx.sessionId, cwd: ctx.project,
+    runProcess: async (argv, init, fallback) => {
+      const result = await fallback(argv, init);
+      if (argv[2] === 'snapshot') {
+        const snapshot = JSON.parse(result.stdout);
+        snapshot.debounceMs = 2000;
+        for (const item of snapshot.items) item.remainingMs = 2000;
+        result.stdout = JSON.stringify(snapshot);
+        polls += 1;
+      }
+      return result;
+    },
+  });
+  register(host.on, { openAtStart: 'off' });
+  await host.dispatch('session.start', { surface: 'desktop' });
+  await host.dispatch('command.run', { command: 'fons', args: 'open' });
+  const poll = host.timers.find((entry) => entry.ms === 2500 && !entry.once);
+  const tick = host.timers.find((entry) => entry.ms === 1000 && !entry.once);
+  const invalidations = host.invalidations;
+  const beforePoll = polls;
+  host.advanceTime(1500);
+  poll.fn();
+  await host.waitUntil(() => polls > beforePoll);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(host.invalidations, invalidations);
+  host.advanceTime(600);
+  tick.fn();
+  await host.waitUntil(() => host.invalidations > invalidations);
+  assert.match(renderText(await host.renderPane()), /就绪/);
+
+  await createBridgeCaller(ctx)('pool', {
+    sessionId: ctx.sessionId, op: 'settings',
+    data: { update: { workspaceAction: { path: ctx.project, mode: 'disable' } } },
+  });
+  const beforeStatusPoll = polls;
+  poll.fn();
+  await host.waitUntil(() => polls > beforeStatusPoll);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(renderText(await host.renderPane()), /当前工作区已停用/);
 });

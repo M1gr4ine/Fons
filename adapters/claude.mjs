@@ -36,7 +36,7 @@ export function findClaudeWorkspace(cwd, homeDir) {
   return findMarkedWorkspace(cwd, MARKERS, homeDir);
 }
 
-function isMainTranscriptPath(transcriptPath, sessionId) {
+export function isMainTranscriptPath(transcriptPath, sessionId) {
   if (!transcriptPath) return false;
   if (path.basename(transcriptPath).toLowerCase() !== (sessionId + ".jsonl").toLowerCase()) return false;
   const segments = path.dirname(transcriptPath).split(/[\\/]+/).map((part) => part.toLowerCase());

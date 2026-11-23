@@ -58,11 +58,12 @@ test('claude init builds a valid marketplace with owner, is idempotent, and repo
   assert.equal(manifest.userConfig?.openAtStart?.default, 'on');
   assert.equal(manifest.hooks, undefined);
   assert.equal(fs.existsSync(path.join(initial.bundle, 'CLAUDE.md')), false);
-  assert.equal(fs.existsSync(path.join(initial.bundle, 'hooks', 'fons-pane.mjs')), true);
   assert.equal(fs.existsSync(path.join(initial.bundle, 'claude', 'pane-bridge.mjs')), true);
 
   const hooksConfig = JSON.parse(fs.readFileSync(path.join(initial.bundle, 'hooks', 'hooks.json'), 'utf8'));
   assert.deepEqual(hooksConfig.modules, ['./fons-pane.mjs']);
+  const paneModule = await import(pathToFileURL(path.join(initial.bundle, 'hooks', hooksConfig.modules[0])).href);
+  assert.equal(typeof paneModule.register, 'function');
   assert.deepEqual(Object.keys(hooksConfig.hooks), ['SessionStart', 'UserPromptSubmit', 'PostToolBatch', 'Stop', 'SessionEnd']);
   for (const groups of Object.values(hooksConfig.hooks)) {
     const hook = groups[0].hooks[0];
@@ -93,7 +94,7 @@ test('claude init builds a valid marketplace with owner, is idempotent, and repo
   const checkout = path.join(ctx.root, 'updated-repo');
   for (const rel of [
     'adapters/antigravity.mjs', 'adapters/claude.mjs', 'adapters/codex.mjs', 'adapters/index.mjs', 'adapters/shared.mjs',
-    'claude/hooks.json', 'claude/init.mjs', 'claude/pane.mjs', 'claude/pane-bridge.mjs',
+    'claude/hooks.json', 'claude/init.mjs', 'claude/pane.mjs', 'claude/pane-view.mjs', 'claude/pane-bridge.mjs',
     'scripts/fons-config.mjs', 'scripts/fons-engine.mjs', 'scripts/fons-hook.mjs', 'scripts/fons-inbox.mjs',
     'scripts/fons-package.mjs', 'scripts/fons-panel.mjs', 'scripts/fons-panel-ui.mjs',
     'scripts/fons-sessions.mjs', 'scripts/fons-store.mjs',

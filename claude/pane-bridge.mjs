@@ -5,11 +5,11 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { claudeAppData, findClaudeWorkspace } from '../adapters/claude.mjs';
-import { effectiveHome } from '../adapters/shared.mjs';
-import { isWorkspaceEnabled, readFonsConfig, resolveConfiguredDebounceMs } from '../scripts/fons-config.mjs';
+import { claudeAppData, findClaudeWorkspace, isMainTranscriptPath } from '../adapters/claude.mjs';
+import { absolutePath, effectiveHome } from '../adapters/shared.mjs';
+import { readFonsConfig, resolveConfiguredDebounceMs } from '../scripts/fons-config.mjs';
 import { isValidPanelUrl, openPanelUrl, startPanelServer } from '../scripts/fons-panel.mjs';
-import { isValidSessionId, lookupConversation } from '../scripts/fons-store.mjs';
+import { isValidSessionId, lookupConversation, registerConversation } from '../scripts/fons-store.mjs';
 import {
   applySettingsPatch, buildCurrentWorkspaceInfo, createBoundPoolRoutes, formatSettingsPayload,
   isPlainObject,
@@ -17,7 +17,7 @@ import {
 
 const SELF_PATH = fileURLToPath(import.meta.url);
 const ALLOWED_POOL_OPS = new Set([
-  'add', 'complete', 'update', 'remove', 'reopen', 'archive', 'hold', 'release', 'settings',
+  'add', 'complete', 'update', 'remove', 'reopen', 'archive', 'hold', 'release', 'settings', 'register',
 ]);
 const WEB_PANEL_READY_TIMEOUT_MS = 4000;
 const WEB_PANEL_POLL_MS = 40;
@@ -44,19 +44,41 @@ function resolveSessionContext({ sessionId, env, cwd }) {
   const validId = isValidSessionId(sessionId) ? sessionId : null;
   const entry = validId ? lookupConversation({ appData, sessionId: validId }) : null;
   const matched = entry?.host === 'claude' ? { ...entry, sessionId: validId, appData } : null;
-  return { appData, homeDir, entry: matched };
+  return { appData, homeDir, entry: matched, existing: entry };
 }
 
-function readUnregisteredSnapshot({ appData, homeDir, env, cwd }) {
+function findMainTranscript(appData, sessionId) {
+  if (!isValidSessionId(sessionId)) return null;
+  const projects = path.join(appData, 'projects');
+  if (!fs.existsSync(projects)) return null;
+  const matches = fs.readdirSync(projects, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(projects, entry.name, sessionId + '.jsonl'))
+    .filter((file) => isMainTranscriptPath(file, sessionId) && fs.statSync(file, { throwIfNoEntry: false })?.isFile());
+  return matches.length === 1 ? absolutePath(matches[0]) : null;
+}
+
+function withSnapshotEtag(snapshot) {
+  // The pool etag already covers rows, attachments and editing holds, without ticking with remainingMs.
+  const { registered, scope, rootDir, title, workspaceEnabled, workspaceDisabled,
+    debounceMs, canArchive, etag, settings } = snapshot;
+  const stable = { registered, scope, rootDir, title, workspaceEnabled, workspaceDisabled,
+    debounceMs, canArchive, etag, settings };
+  return { ...snapshot, etag: crypto.createHash('sha256').update(JSON.stringify(stable)).digest('hex') };
+}
+
+function readUnregisteredState({ appData, homeDir, env, cwd, sessionId, existing }) {
   const startDir = env.CLAUDE_PROJECT_DIR?.trim() || cwd;
   const rootDir = findClaudeWorkspace(startDir, homeDir);
   const config = readFonsConfig(appData);
-  const workspaceEnabled = rootDir ? isWorkspaceEnabled({ appData, rootDir, config }) : true;
   const currentWorkspace = buildCurrentWorkspaceInfo({ appData, config, rootDir, detectLocalPlugin: false });
+  const workspaceEnabled = currentWorkspace?.enabled ?? true;
+  const transcriptPath = workspaceEnabled && !existing ? findMainTranscript(appData, sessionId) : null;
   const settings = formatSettingsPayload({
-    config, currentWorkspace, sessionRegistered: false, canRegisterSession: false, env,
+    config, currentWorkspace, sessionRegistered: false,
+    canRegisterSession: Boolean(transcriptPath), env,
   });
-  return {
+  const snapshot = withSnapshotEtag({
     ok: true,
     registered: false,
     scope: rootDir ? 'workspace' : 'no-workspace',
@@ -69,7 +91,8 @@ function readUnregisteredSnapshot({ appData, homeDir, env, cwd }) {
     canArchive: false,
     etag: '',
     settings,
-  };
+  });
+  return { snapshot, transcriptPath };
 }
 
 function readBoundSnapshot(entry, routes, { appData, env }) {
@@ -79,7 +102,7 @@ function readBoundSnapshot(entry, routes, { appData, env }) {
   const pool = poolOutcome.data;
   const settings = settingsOutcome.error ? null : settingsOutcome.data;
   const workspaceDisabled = Boolean(pool.workspaceDisabled);
-  return {
+  return withSnapshotEtag({
     ok: true,
     registered: true,
     scope: entry.scope,
@@ -92,21 +115,42 @@ function readBoundSnapshot(entry, routes, { appData, env }) {
     canArchive: Boolean(pool.canArchive),
     etag: pool.etag ?? '',
     settings,
-  };
+  });
 }
 
 function readSnapshot({ sessionId, env, cwd }) {
-  const { appData, homeDir, entry } = resolveSessionContext({ sessionId, env, cwd });
-  if (!entry) return readUnregisteredSnapshot({ appData, homeDir, env, cwd });
+  const { appData, homeDir, entry, existing } = resolveSessionContext({ sessionId, env, cwd });
+  if (!entry) return readUnregisteredState({ appData, homeDir, env, cwd, sessionId, existing }).snapshot;
   return readBoundSnapshot(entry, createBoundPoolRoutes(entry, { env }), { appData, env });
+}
+
+function registerCurrentSession({ sessionId, env, cwd, appData, homeDir, entry, existing }) {
+  if (entry) {
+    return { ok: true, result: {}, snapshot: readBoundSnapshot(entry, createBoundPoolRoutes(entry, { env }), { appData, env }) };
+  }
+  const { snapshot, transcriptPath } = readUnregisteredState({ appData, homeDir, env, cwd, sessionId, existing });
+  if (!transcriptPath) {
+    return { ok: false, error: '无法登记当前会话：请确认工作区已启用且主会话记录唯一可用。', snapshot };
+  }
+  const registered = registerConversation({
+    appData, sessionId, rootDir: snapshot.rootDir, scope: snapshot.scope, host: 'claude', transcriptPath,
+  });
+  if (registered.host !== 'claude' || registered.transcriptPath !== transcriptPath) {
+    return { ok: false, error: '当前会话登记与已有记录冲突。' };
+  }
+  const bound = { ...registered, appData, sessionId };
+  return { ok: true, result: {}, snapshot: readBoundSnapshot(bound, createBoundPoolRoutes(bound, { env }), { appData, env }) };
 }
 
 function runPoolMutation({ sessionId, op, data, env, cwd }) {
   if (!ALLOWED_POOL_OPS.has(op)) {
     return { ok: false, error: '不支持的灵感池操作：' + String(op) };
   }
-  const { appData, homeDir, entry } = resolveSessionContext({ sessionId, env, cwd });
+  const { appData, homeDir, entry, existing } = resolveSessionContext({ sessionId, env, cwd });
   const body = isPlainObject(data) ? data : {};
+  if (op === 'register') {
+    return registerCurrentSession({ sessionId, env, cwd, appData, homeDir, entry, existing });
+  }
   if (!entry) {
     if (op === 'settings' && body.update !== undefined) {
       const updated = applySettingsPatch({ appData, update: body.update, detectLocalPlugin: false });
@@ -116,7 +160,7 @@ function runPoolMutation({ sessionId, op, data, env, cwd }) {
       return {
         ok: true,
         result: { config: updated.config },
-        snapshot: readUnregisteredSnapshot({ appData, homeDir, env, cwd }),
+        snapshot: readUnregisteredState({ appData, homeDir, env, cwd, sessionId, existing }).snapshot,
       };
     }
     return { ok: false, error: '当前会话尚未由 Fons Hook 登记，请先新开会话或稍后刷新。' };

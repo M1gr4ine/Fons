@@ -30,6 +30,7 @@ const PLUGIN_FILES = [
   { target: '.claude-plugin/plugin.json', contents: JSON.stringify(PLUGIN_MANIFEST, null, 2) + '\n' },
   { source: 'claude/hooks.json', target: 'hooks/hooks.json' },
   { source: 'claude/pane.mjs', target: 'hooks/fons-pane.mjs' },
+  { source: 'claude/pane-view.mjs', target: 'hooks/pane-view.mjs' },
   'claude/pane-bridge.mjs',
   'adapters/antigravity.mjs',
   'adapters/claude.mjs',
