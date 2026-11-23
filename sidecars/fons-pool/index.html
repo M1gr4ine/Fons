@@ -1095,15 +1095,15 @@
             <span class="settings-hint" data-testid="fons-debounce-hint">设为 0 即时投递，保存后立即生效</span>
           </div>
           <div class="debounce-input-wrap">
-            <input id="fons-debounce-sec-input" class="debounce-input" type="number" min="0" max="3600" step="1" value="45" data-testid="fons-debounce-sec" aria-label="蓄水消抖时长（秒）">
+            <input id="fons-debounce-sec-input" class="debounce-input" type="number" min="0" max="3600" step="1" value="15" data-testid="fons-debounce-sec" aria-label="蓄水消抖时长（秒）">
             <span class="debounce-unit">秒</span>
           </div>
         </div>
         <div class="preset-row" data-testid="fons-debounce-presets">
           <button type="button" class="preset-chip" data-testid="fons-debounce-preset-0" data-debounce-preset="0">0s</button>
           <button type="button" class="preset-chip" data-testid="fons-debounce-preset-15" data-debounce-preset="15">15s</button>
+          <button type="button" class="preset-chip" data-testid="fons-debounce-preset-30" data-debounce-preset="30">30s</button>
           <button type="button" class="preset-chip" data-testid="fons-debounce-preset-45" data-debounce-preset="45">45s</button>
-          <button type="button" class="preset-chip" data-testid="fons-debounce-preset-90" data-debounce-preset="90">90s</button>
         </div>
         <div class="settings-row">
           <div class="settings-label-col">
@@ -1177,7 +1177,7 @@
   <script>
     (() => {
       'use strict';
-      const DEFAULT_DEBOUNCE_MS = 45000;
+      const DEFAULT_DEBOUNCE_MS = 15000;
       const HOLD_RENEW_MS = 5000;
       const TYPING_QUIET_MS = 1200;
       const TIMER_TICK_MS = 1000;
@@ -1210,8 +1210,8 @@
         debouncePresets: [
           $('[data-testid="fons-debounce-preset-0"]'),
           $('[data-testid="fons-debounce-preset-15"]'),
+          $('[data-testid="fons-debounce-preset-30"]'),
           $('[data-testid="fons-debounce-preset-45"]'),
-          $('[data-testid="fons-debounce-preset-90"]'),
         ],
         stopWait: $('[data-testid="fons-stop-wait"]'),
         stopWaitHint: $('[data-testid="fons-stop-wait-hint"]'),

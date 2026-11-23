@@ -45,7 +45,7 @@ function harness({ host = true, secureFetch = true, now } = {}) {
     '[data-testid="fons-flow-up"]', '[data-testid="fons-flow-right"]',
     '[data-testid="fons-debounce-sec"]', '[data-testid="fons-debounce-hint"]',
     '[data-testid="fons-debounce-preset-0"]', '[data-testid="fons-debounce-preset-15"]',
-    '[data-testid="fons-debounce-preset-45"]', '[data-testid="fons-debounce-preset-90"]',
+    '[data-testid="fons-debounce-preset-30"]', '[data-testid="fons-debounce-preset-45"]',
     '[data-testid="fons-stop-wait"]', '[data-testid="fons-stop-wait-hint"]',
     '[data-testid="fons-auto-attach"]',
     '[data-testid="fons-current-ws-name"]', '[data-testid="fons-current-ws-status"]',
@@ -62,7 +62,7 @@ function harness({ host = true, secureFetch = true, now } = {}) {
   elements.get('[data-testid="fons-settings-error"]').hidden = true;
   elements.get('[data-testid="fons-register-session"]').hidden = true;
   elements.get('[data-testid="fons-workspace-rules"]').hidden = true;
-  for (const preset of [0, 15, 45, 90]) {
+  for (const preset of [0, 15, 30, 45]) {
     elements.get(`[data-testid="fons-debounce-preset-${preset}"]`).dataset.debouncePreset = String(preset);
   }
   const lightbox = elements.get('[data-testid="fons-lightbox"]');
@@ -858,7 +858,7 @@ test('settings popover loads parameters, saves debounce/stopWait/workspace chang
   assert.equal(panel.requests[1].url, '/api/pool/settings');
   const settingsData = (overrides = {}) => ({
     config: {
-      debounceSec: 45,
+      debounceSec: 15,
       stopWaitDebounce: false,
       autoAttachWorkspaces: true,
       enabledWorkspaces: [],
@@ -880,7 +880,9 @@ test('settings popover loads parameters, saves debounce/stopWait/workspace chang
   });
   panel.requests[1].resolve(response(settingsData()));
   await settle();
-  assert.equal(panel.elements.get('[data-testid="fons-debounce-sec"]').value, '45');
+  assert.equal(panel.elements.get('[data-testid="fons-debounce-sec"]').value, '15');
+  assert.equal(panel.elements.get('[data-testid="fons-debounce-preset-15"]').dataset.active, 'true');
+  assert.equal(panel.elements.get('[data-testid="fons-debounce-preset-30"]').dataset.active, 'false');
   assert.equal(panel.elements.get('[data-testid="fons-current-ws-name"]').textContent, 'vcdeslop');
   assert.equal(panel.elements.get('[data-testid="fons-register-session"]').hidden, false);
 

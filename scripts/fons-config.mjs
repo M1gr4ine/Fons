@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export const DEFAULT_DEBOUNCE_SEC = 45;
+export const DEFAULT_DEBOUNCE_SEC = 15;
 const MIN_DEBOUNCE_SEC = 0;
 const MAX_DEBOUNCE_SEC = 3600;
 

@@ -565,6 +565,12 @@ test('Claude Mod pane handles settings UI, ui.close edit release, and open-web b
   await findNode(initialTree, (n) => n.type === 'Button' && n.props.key === 'settings').props.onPress();
   const settingsTree = await host.renderPane();
   assert.match(renderText(settingsTree), /灵感池设置/);
+  assert.deepEqual(
+    collectNodes(settingsTree)
+      .filter((n) => n.type === 'Button' && String(n.props.key || '').startsWith('db-'))
+      .map((n) => n.props.label),
+    ['0s', '15s ●', '30s', '45s'],
+  );
   await findNode(settingsTree, (n) => n.type === 'Button' && n.props.key === 'db-30').props.onPress();
   const afterPreset = await host.renderPane();
   assert.equal(findNode(afterPreset, (n) => n.type === 'Button' && n.props.key === 'db-30').props.label, '30s ●');

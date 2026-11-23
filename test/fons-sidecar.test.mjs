@@ -384,7 +384,7 @@ test('settings route updates debounce, stop-wait, workspace mount rules, and sup
 
   const wsUri = pathToFileURL(ctx.rootDir).href;
   const initial = post(ctx, 'settings', { workspaceUris: [wsUri] });
-  assert.equal(initial.config.debounceSec, 45);
+  assert.equal(initial.config.debounceSec, 15);
   assert.equal(initial.config.stopWaitDebounce, false);
   assert.equal(initial.config.autoAttachWorkspaces, true);
   assert.equal(initial.currentWorkspace.enabled, true);
@@ -397,15 +397,15 @@ test('settings route updates debounce, stop-wait, workspace mount rules, and sup
   assert.equal(registered.canRegisterSession, false);
   const firstSnap = read(ctx, { workspaceUris: [wsUri] });
   assert.equal(firstSnap.registered, true);
-  assert.equal(firstSnap.debounceMs, 45000);
+  assert.equal(firstSnap.debounceMs, 15000);
 
   // Updating debounceSec invalidates etag and reflects immediately in pool snapshot
-  const updated = post(ctx, 'settings', { workspaceUris: [wsUri], update: { debounceSec: 15, stopWaitDebounce: true } });
-  assert.equal(updated.config.debounceSec, 15);
+  const updated = post(ctx, 'settings', { workspaceUris: [wsUri], update: { debounceSec: 30, stopWaitDebounce: true } });
+  assert.equal(updated.config.debounceSec, 30);
   assert.equal(updated.config.stopWaitDebounce, true);
   const afterDebounce = read(ctx, { workspaceUris: [wsUri], etag: firstSnap.etag });
   assert.equal(afterDebounce.unchanged, undefined);
-  assert.equal(afterDebounce.debounceMs, 15000);
+  assert.equal(afterDebounce.debounceMs, 30000);
 
   // Disabling the current workspace blocks pool reads & mutations cleanly
   const disabled = post(ctx, 'settings', {
@@ -429,7 +429,7 @@ test('settings route updates debounce, stop-wait, workspace mount rules, and sup
   assert.equal(post(ctx, 'settings', { update: { stopWaitDebounce: 'bad' } }).status, 400);
   assert.equal(post(ctx, 'settings', { update: 'bad' }).status, 400);
   assert.equal(post(ctx, 'settings', { update: { workspaceAction: { path: path.join(ctx.rootDir, 'bad\0path'), mode: 'disable' } } }).status, 400);
-  assert.equal(post(ctx, 'settings', { workspaceUris: [wsUri] }).config.debounceSec, 15);
+  assert.equal(post(ctx, 'settings', { workspaceUris: [wsUri] }).config.debounceSec, 30);
 
   // Unregistered session in a disabled workspace reports workspaceDisabled and refuses registration without partial config write
   const otherWs = path.join(ctx.rootDir, 'other-ws');

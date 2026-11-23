@@ -18,6 +18,7 @@ function makeTempDir(t) {
 test('config defaults, updates, validation and env override precedence work as expected', (t) => {
   const root = makeTempDir(t);
   const appData = path.join(root, 'host');
+  assert.equal(DEFAULT_DEBOUNCE_SEC, 15);
   assert.deepEqual(readFonsConfig(appData), {
     debounceSec: DEFAULT_DEBOUNCE_SEC,
     stopWaitDebounce: false,
@@ -26,10 +27,10 @@ test('config defaults, updates, validation and env override precedence work as e
     disabledWorkspaces: [],
   });
 
-  const saved = updateFonsConfig(appData, { debounceSec: 15, stopWaitDebounce: true });
-  assert.equal(saved.debounceSec, 15);
+  const saved = updateFonsConfig(appData, { debounceSec: 30, stopWaitDebounce: true });
+  assert.equal(saved.debounceSec, 30);
   assert.equal(saved.stopWaitDebounce, true);
-  assert.equal(resolveConfiguredDebounceMs({ appData, env: {} }), 15000);
+  assert.equal(resolveConfiguredDebounceMs({ appData, env: {} }), 30000);
   assert.equal(resolveStopWaitDebounce({ appData, env: {} }), true);
   assert.equal(hasEnvDebounceOverride({}), false);
   assert.equal(hasEnvStopWaitOverride({}), false);

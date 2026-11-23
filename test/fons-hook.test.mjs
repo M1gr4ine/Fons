@@ -179,7 +179,7 @@ test("PreInvocation 消抖、合并编号、幂等去重与跨会话独立账本
     "- [x] 已完成忽略项",
   ].join("\n");
 
-  // 消抖窗口未满（5s < 45s）：不投递、记录每条起点
+  // 消抖窗口未满（5s < 15s）：不投递、记录每条起点
   writeIdeas(ws, ideasContent, 5);
   assert.deepEqual(
     runHook({ hookEventName: "PreInvocation", conversationId: "11111111-1111-4111-8111-111111111104", cwd: ws }),
@@ -189,7 +189,7 @@ test("PreInvocation 消抖、合并编号、幂等去重与跨会话独立账本
   assert.equal(Object.keys(pendingState.pendingAt ?? {}).length, 3);
   assert.equal(Object.keys(pendingState.delivered ?? {}).length, 0);
 
-  // 消抖窗口期满（65s >= 45s）：合并编号并写入 delivered
+  // 消抖窗口期满（65s >= 15s）：合并编号并写入 delivered
   writeIdeas(ws, ideasContent, 65);
   for (const key of Object.keys(pendingState.pendingAt)) pendingState.pendingAt[key] -= 61000;
   fs.writeFileSync(path.join(ws, ".agents", "fons", ".state-11111111-1111-4111-8111-111111111104.json"), JSON.stringify(pendingState));
@@ -852,7 +852,7 @@ test('each pending item keeps its own timer when new items arrive or delivered i
   assert.ok(beforeAt > 0);
   const snap = store.readPoolSnapshot(ctx);
   const draftSnap = snap.items.find((row) => row.id === firstId);
-  assert.ok(draftSnap.remainingMs > 0 && draftSnap.remainingMs <= 45000);
+  assert.ok(draftSnap.remainingMs > 0 && draftSnap.remainingMs <= 15000);
   const delivered = snap.items.find((row) => row.text === 'sent');
   store.completeIdea({ ...ctx, token: delivered.token });
   assert.deepEqual(runHook(pre), {});
@@ -861,7 +861,7 @@ test('each pending item keeps its own timer when new items arrive or delivered i
   assert.deepEqual(runHook(pre), {});
   const afterState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
   assert.equal(afterState.pendingAt[firstId], beforeAt);
-  afterState.pendingAt[firstId] = Date.now() - 46000;
+  afterState.pendingAt[firstId] = Date.now() - 16000;
   fs.writeFileSync(statePath, JSON.stringify(afterState));
   const partialMsg = runHook(pre).injectSteps[0].systemMessage.systemMessage;
   assert.match(partialMsg, /draftOne/);
@@ -1057,20 +1057,20 @@ test('model completion preserves another draft timer and editing that draft rese
   assert.match(preNow(ctx).injectSteps[0].systemMessage.systemMessage, /sent/);
   store.addIdeas({ ...ctx, texts: ['draft'] });
   const draftId = store.readPoolSnapshot(ctx).items.find((row) => row.text === 'draft').id;
-  const initialMtime = new Date(Date.now() - 30000);
+  const initialMtime = new Date(Date.now() - 10000);
   fs.utimesSync(paths.ideas, initialMtime, initialMtime);
   assert.deepEqual(runHook(pre), {});
   const initial = JSON.parse(fs.readFileSync(paths.state, 'utf8'));
   assert.equal(initial.pendingAt[draftId], fs.statSync(paths.ideas).mtimeMs);
   fs.writeFileSync(paths.ideas, '【√】 sent\n- [ ] draft\n');
-  const completionMtime = new Date(Date.now() - 15000);
+  const completionMtime = new Date(Date.now() - 6000);
   fs.utimesSync(paths.ideas, completionMtime, completionMtime);
   assert.deepEqual(runHook(pre), {});
   const afterCompletion = JSON.parse(fs.readFileSync(paths.state, 'utf8'));
   assert.equal(afterCompletion.pendingAt[draftId], initial.pendingAt[draftId]);
   fs.writeFileSync(paths.ideas, '【√】 sent\n- [ ] revised draft\n');
   const revisedId = store.readPoolSnapshot(ctx).items.find((row) => row.text === 'revised draft').id;
-  const editMtime = new Date(Date.now() - 5000);
+  const editMtime = new Date(Date.now() - 2000);
   fs.utimesSync(paths.ideas, editMtime, editMtime);
   const expectedAt = fs.statSync(paths.ideas).mtimeMs;
   assert.deepEqual(runHook(pre), {});
@@ -1078,8 +1078,8 @@ test('model completion preserves another draft timer and editing that draft rese
   assert.equal(afterEdit.pendingAt[draftId], undefined);
   assert.equal(afterEdit.pendingAt[revisedId], expectedAt);
   assert.ok(afterEdit.pendingAt[revisedId] > initial.pendingAt[draftId]);
-  const snapshot = store.readPoolSnapshot({ ...ctx, debounceMs: 45000, now: expectedAt + 2000 });
-  assert.equal(snapshot.items.find((item) => item.id === revisedId).remainingMs, 43000);
+  const snapshot = store.readPoolSnapshot({ ...ctx, debounceMs: 15000, now: expectedAt + 2000 });
+  assert.equal(snapshot.items.find((item) => item.id === revisedId).remainingMs, 13000);
   assert.equal(snapshot.items.find((item) => item.text === 'sent').status, 'done');
   assert.equal(snapshot.items.find((item) => item.text === 'revised draft').status, 'buffering');
   const deliveredMsg = preNow(ctx).injectSteps[0].systemMessage.systemMessage;
@@ -1087,22 +1087,22 @@ test('model completion preserves another draft timer and editing that draft rese
   assert.deepEqual(preNow(ctx), {});
 });
 
-test('per-item 45s debounce and single-item hold defer only the held item in PreInvocation and Stop', (t) => {
+test('per-item 15s debounce and single-item hold defer only the held item in PreInvocation and Stop', (t) => {
   const ws = makeTempDir(t, HOOK_A);
   const ctx = { rootDir: ws, sessionId: HOOK_A };
   const pre = { hookEventName: 'PreInvocation', cwd: ws, conversationId: HOOK_A };
 
-  writeIdeas(ws, '- [ ] readyItem\n- [ ] heldItem', 40);
+  writeIdeas(ws, '- [ ] readyItem\n- [ ] heldItem', 10);
   assert.deepEqual(runHook(pre), {});
 
   const snap = store.readPoolSnapshot(ctx);
   const readyId = snap.items.find((row) => row.text === 'readyItem').id;
   const heldId = snap.items.find((row) => row.text === 'heldItem').id;
-  writeIdeas(ws, '- [ ] readyItem\n- [ ] heldItem', 46);
+  writeIdeas(ws, '- [ ] readyItem\n- [ ] heldItem', 16);
   const paths = store.sessionPaths(ctx);
   const state = JSON.parse(fs.readFileSync(paths.state, 'utf8'));
-  state.pendingAt[readyId] = Date.now() - 46000;
-  state.pendingAt[heldId] = Date.now() - 46000;
+  state.pendingAt[readyId] = Date.now() - 16000;
+  state.pendingAt[heldId] = Date.now() - 16000;
   fs.writeFileSync(paths.state, JSON.stringify(state));
 
   store.holdEditing({ ...ctx, id: heldId });

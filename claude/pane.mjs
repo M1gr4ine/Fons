@@ -1,7 +1,7 @@
 const PANE_ID = 'fons-pool';
 const PANE_TITLE = 'Fons · 灵感池';
-const DEFAULT_DEBOUNCE_SEC = 45;
-const DEBOUNCE_PRESETS = [0, 15, 30, 45, 60, 90];
+const DEFAULT_DEBOUNCE_SEC = 15;
+const DEBOUNCE_PRESETS = [0, 15, 30, 45];
 const TICK_MS = 1000;
 const POLL_MS = 2500;
 const HOLD_RENEW_MS = 10_000;
