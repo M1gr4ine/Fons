@@ -3,5 +3,5 @@
   "displayName": "灵感池",
   "description": "Fons 会话灵感池侧边栏面板与全局 Hook：自动接管所有工作区与无工作区会话，并可在面板设置中按工作区开关与调整投递参数。",
   "logo": "assets/logo.svg",
-  "version": "0.4.0"
+  "version": "0.4.1"
 }

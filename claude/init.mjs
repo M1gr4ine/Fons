@@ -13,7 +13,7 @@ const PLUGIN_ID = 'fons@' + MARKETPLACE;
 const PLUGIN_MANIFEST = {
   name: 'fons',
   displayName: 'Fons · 灵感池',
-  version: '0.4.0',
+  version: '0.4.1',
   description: '在 Claude Code 会话中记录、蓄水并投递补充灵感，提供原生侧栏面板与回执自动勾选。',
   author: { name: 'Fons' },
   userConfig: {

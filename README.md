@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <code>v0.4.0</code> · Node.js 零外部依赖 ·
+  <code>v0.4.1</code> · Node.js 零外部依赖 ·
   <a href="#多宿主支持一览">多宿主对比</a> ·
   <a href="#antigravity-快速开始">Antigravity</a> ·
   <a href="#codex-快速开始">Codex</a> ·
