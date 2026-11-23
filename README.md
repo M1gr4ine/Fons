@@ -50,8 +50,8 @@
 | --- | --- | --- | --- |
 | **安装方式** | 全局安装 `ui-plugin` 至 `plugins/fons-pool`（一次覆盖全部会话） | `fons codex init` → 注册本地插件市场并安装 | `fons claude init` → 注册本地插件市场并安装 |
 | **原生面板** | 右侧扩展侧栏（Sidecar） | 右侧标签栏 **Open → 灵感池** / `@Fons · 灵感池`（MCP Apps） | 桌面端默认自动打开原生侧栏，`/fons` 随时开关 |
-| **附件上传** | 原生面板（粘贴/拖拽/选文件）+ CLI `-a` | 原生面板（粘贴/拖拽/选文件）+ `fons panel` + CLI `-a` | 侧栏点 **「网页版」** / `/fons web`（`fons panel`）+ CLI `-a`（侧栏保留已有附件并显示数量） |
-| **面板内设置** | 完整设置（水位、蓄水、收尾、工作区规则、一键登记） | 完整设置（水位、蓄水、收尾、工作区规则） | 侧栏内置常用设置（`0s`–`45s` 预设、收尾、当前工作区启停）；完整设置见「网页版」 |
+| **附件上传** | 原生面板（粘贴/拖拽/选文件）+ CLI `-a` | 原生面板（粘贴/拖拽/选文件）+ `fons panel` + CLI `-a` | 在「网页版」或通过 CLI `-a` 添加附件，原生侧栏可查看文件名和逐个移除 |
+| **面板内设置** | 完整设置（水位、蓄水、收尾、工作区规则、一键登记） | 完整设置（水位、蓄水、收尾、工作区规则） | 蓄水预设与自定义秒数、收尾等待、工作区默认规则与单独启停、当前会话登记 |
 | **生命周期 Hook** | `SessionStart` / `PreInvocation` / `Stop` | `SessionStart` / `UserPromptSubmit` / `PostToolUse` / `Stop` | `SessionStart` / `UserPromptSubmit` / `PostToolBatch` / `Stop` / `SessionEnd` |
 
 ## 实机截图
@@ -59,18 +59,17 @@
 <table>
   <tr>
     <td align="center" width="50%">
-      <img src="assets/screenshot-dark.png" alt="深色主题 · 自下而上水位与编辑暂缓" width="100%"><br>
-      <sub>深色主题 · 自下而上蓄水（含蓄水中 / 编辑暂缓 / 已投递 / 已完成）</sub>
+      <img src="assets/screenshot-dark.png" alt="深色主题 · 自下而上水位、附件预览与编辑暂缓" width="100%"><br>
+      <sub>深色主题 · 自下而上蓄水（含附件缩略/文件块、编辑暂缓、已投递与已完成）</sub>
     </td>
     <td align="center" width="50%">
-      <img src="assets/screenshot-light.png" alt="浅色主题 · 自左向右水位推进" width="100%"><br>
+      <img src="assets/screenshot-light.png" alt="浅色主题 · 自左向右水位推进与附件预览" width="100%"><br>
       <sub>浅色主题 · 自左向右水位推进</sub>
     </td>
   </tr>
 </table>
 
-> 状态圆点说明：虚线圆圈 = **待投递（蓄水中）**，点击可直接标为完成；实心点圆圈 = **已投递（已发出，等待回执）**；蓝底对勾 = **已完成**，点击可重新打开。  
-> 注：截图用于展示水位与三态视觉效果；当前版本已将水位方向切换收纳至顶栏 **「设置」**，并在底部速记框新增了附件入口。
+> 状态圆点说明：虚线圆圈 = **待投递（蓄水中）**，点击可直接标为完成；实心点圆圈 = **已投递（已发出，等待回执）**；蓝底对勾 = **已完成**，点击可重新打开。
 
 ## 工作原理与架构
 
@@ -101,7 +100,7 @@ Fons 将收件箱解析（`scripts/fons-inbox.mjs`）、状态账本（`scripts/
   - `SessionStart` / `SessionEnd`：登记主会话（忽略带 `agent_id` 的子代理，兼容 `claude --agent` 主会话）、绑定 `<session_id>.jsonl` 主路径锚点并在启动时以事实陈述形式说明 `[FONS_ACK: 编号]` 回执约定；会话结束时记录 `endedAt`，`resume` 恢复时清除。
   - `UserPromptSubmit` / `PostToolBatch`：每批工具调用（含并行与失败调用）仅触发一次，以事实陈述文案注入到期条目与撤回通知（单次 `additionalContext` 上限 `10,000` 字符，超出条目延后到下一投递点）。
   - `Stop`：仅读取 stdin 中的 `last_assistant_message` 提取 `[FONS_ACK: ...]` 自动回写 `【√】 `（不读 transcript 文件，按 `{ promptId, digest }` 去重）；未确认条目通过 `hookSpecificOutput.additionalContext` 按 `prompt_id` 兜底续跑（每轮最多 2 次）。
-  - **原生侧栏模块**：通过 `claude/hooks.json` 加载 `fons-pane.mjs`（源码 `claude/pane.mjs`），经 `claude/pane-bridge.mjs` 复用统一账本路由并按需拉起本地 `fons panel` 网页版。
+  - **原生侧栏模块**：通过 `claude/hooks.json` 加载 `fons-pane.mjs`（源码 `claude/pane.mjs` + `claude/pane-view.mjs`），经 `claude/pane-bridge.mjs` 复用统一账本路由、支持会话原位登记与快照 `etag` 去重，并按需拉起本地 `fons panel` 网页版。
 
 ### 数据落盘与收件箱格式
 
@@ -213,7 +212,7 @@ codex plugin add fons@fons-local
 
 ## Claude Code 快速开始
 
-> **版本要求**：Hook 依赖支持 `PostToolBatch` 的 Claude Code 版本；原生侧栏面板依赖支持插件 UI 模块（`modules`）的版本（具体最低稳定版本号待实测确认）。不支持原生侧栏或纯终端环境可直接使用下方的 [`fons panel`](#通用本地-web-面板) 与 `fons` CLI。
+> **版本要求**：原生侧栏面板需终端 Claude Code `2.1.287+` 或 Desktop 内置 Claude Code `2.1.286+`（终端运行 `claude --version` 查看，桌面端在 Code 页本地会话运行 `/status` 查看），Hook 投递依赖 `PostToolBatch` 事件支持（[原生模块版本说明](https://code.claude.com/docs/en/plugins/mods/overview#turn-mods-on-or-off) · [PostToolBatch 事件](https://code.claude.com/docs/en/hooks#posttoolbatch)）。更早版本或纯命令行脚本场景可直接使用下方的 [`fons panel`](#通用本地-web-面板) 与 `fons` CLI。
 
 ### 1. 准备与安装本地插件
 
@@ -231,15 +230,16 @@ claude plugin install fons@fons-local
 
 ### 2. 使用原生侧栏与网页版
 
-- **桌面端原生侧栏（默认自动打开）**：
+- **开关与状态条**：
   - 在对话框输入 `/fons` 可随时开关右侧原生灵感池侧栏（`immediate` 命令，不打断当前执行中的轮次），还支持：
     - `/fons <补充内容>`：直接快速入池（支持多行拆分）
     - `/fons open` / `/fons close`：显式打开或关闭侧栏
     - `/fons web`：在浏览器打开本地完整网页版面板
   - 可在插件配置中将 **「启动时自动打开侧栏」**（`openAtStart`）设为 `off` 改为按需打开；纯终端会话默认不自动打开（需手动 `/fons`），若终端内被内联放置且非手动打开也会自动收起以避免挤压界面。
-  - 侧栏内支持文本速记、1 秒实时蓄水进度条、行内编辑暂缓（自动续期并保留已有附件）、完成、删除/撤回、重开、归档、`↻` 刷新及 `⚙` 常用设置（`0s / 15s / 30s / 45s` 蓄水预设、收尾等蓄水满、当前工作区启停）。
-  - 侧栏关闭且池中存在未完成（蓄水中或已投递）条目时，输入框上方会显示精简状态条与 **「打开侧栏」** 快捷按钮。
-- **上传截图 / 文件或查看完整设置**：点击侧栏右上角 **「网页版」**（或运行 `/fons web`），Fons 会按需拉起并复用后台回环 Web 面板（闲置 `15` 分钟自动退出）。
+  - 侧栏收起且池中仍有蓄水或已投递条目时，输入框上方会显示精简状态条与 **「打开侧栏」** 快捷按钮；存在已到期条目时会标出「含就绪待投」。
+- **原地编辑与附件管理**：顶部速记框常驻可用；点击待投递条目的 **「编辑」** 直接在原条目处展开编辑框（仅暂缓该条自身计时并自动续期），已有附件按文件名展示并支持编辑时逐个移除（保存后生效）。粘贴截图或拖拽新增附件可点顶栏 **「网页版」**（按需拉起并复用后台回环 Web 面板，闲置 `15` 分钟自动退出）或运行 `/fons web` / `fons -a`。
+- **双端排版与折叠归档**：原生视图自动适配桌面端与终端密度（终端采用 6 格彩色水位条与紧凑行距），操作期间即时显示「处理中…」并拦截重复点击；仍有活跃条目且已完成满 `3` 条时，**「已完成」** 分组默认折叠，展开可重开单条灵感，点击组头 **「归档」** 可一键收拢全部已完成条目。
+- **原生设置与会话原位登记**：点击顶栏 `⚙` 可切换 `0s / 15s / 30s / 45s` 预设或输入 `0`–`3600` 的整数秒数，支持开关「收尾等蓄水满」、「所有工作区默认自动启用」以及配置当前工作区的单独启停或恢复默认；会话中途加载插件后，若工作区已启用且能唯一定位当前主转录文件，可直接点击 **「立即启用当前会话」** 免重启开始速记。
 
 ---
 
@@ -312,3 +312,7 @@ node --test
 ```
 
 各里程碑实现记录与后续演进方向见 [ROADMAP.md](ROADMAP.md)。
+
+## 开源协议
+
+本项目采用 [MIT License](LICENSE) 开源协议。
