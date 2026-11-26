@@ -110,8 +110,11 @@ function selectBatch(policy, batch) {
 
 function handleDelivery(data, event, policy, { ready, pendingAt }) {
   const { state, ui } = data;
+  const acknowledged = acknowledgedIds(data, consumeAcknowledgment(state, event));
   const batch = selectBatch(policy, { kind: "delivery", items: ready, retractions: unnotified(ui, state), ui });
+  // Allocate every new token before writing confirmed ACKs back into the inbox.
   const deliveries = markDelivered(batch.items, data, event, policy);
+  settleAcknowledged(data, acknowledged);
   const sendAckHint = deliveries.length > 0 && policy.ackHintPolicy === "once" && !state.ackHintSent;
   if (sendAckHint) state.ackHintSent = true;
   syncPendingLedger(state, pendingAt, deliveries);
@@ -215,6 +218,13 @@ function reserveContinuation(data, items, pendingRetractions, event) {
 function handleStop(data, event, policy, timing) {
   const { state, ui } = data;
   const acknowledged = acknowledgedIds(data, consumeAcknowledgment(state, event));
+  if (event.settleOnly) {
+    if (acknowledged.size) {
+      settleAcknowledged(data, acknowledged);
+      syncPendingLedger(state, timing.pendingAt);
+    }
+    return { kind: "allow" };
+  }
   const open = data.items.filter((item) => !acknowledged.has(item.id) && canDeliverAtStop(item, timing, policy));
   const remaining = [...new Map(open.map((item) => [item.id, item])).values()];
   const batch = selectBatch(policy, { kind: "stop", items: remaining, retractions: unnotified(ui, state), ui });

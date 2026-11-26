@@ -42,7 +42,12 @@ function hasPendingWork(input, event) {
   const fonsDir = resolveFastFonsDir(input);
   if (!fonsDir) return false;
   const ideas = fs.statSync(path.join(fonsDir, `ideas-${sessionId}.md`), { throwIfNoEntry: false });
-  if (ideas?.size) return true;
+  if (ideas?.size) {
+    if (event === 'Stop' && input.fullyIdle === false) {
+      return fs.existsSync(path.join(fonsDir, `.state-${sessionId}.json`));
+    }
+    return true;
+  }
   return event === 'PreInvocation' && fs.existsSync(path.join(fonsDir, `.retract-${sessionId}.pending`));
 }
 
@@ -58,7 +63,7 @@ const fallback = event === 'Stop' ? { decision: 'allow' } : {};
 
 if (
   !['PreInvocation', 'SessionStart', 'Stop'].includes(event) ||
-  (event === 'Stop' && (input.terminationReason !== 'NO_TOOL_CALL' || input.fullyIdle === false)) ||
+  (event === 'Stop' && input.terminationReason !== 'NO_TOOL_CALL') ||
   !hasPendingWork(input, event)
 ) {
   process.stdout.write(JSON.stringify(fallback));

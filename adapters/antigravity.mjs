@@ -16,6 +16,12 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const HOOK_EVENTS = new Set(["PreInvocation", "SessionStart", "Stop"]);
 const NO_WORKSPACE_PRE_HEADER = "[FONS] 完成后末行附 [FONS_ACK: 编号]";
 const STOP_HEADER = "[FONS 收尾核对] 以下补充待处理（完成后在回复末行附 [FONS_ACK: 编号]）：";
+const RETRACTION_HEADER = "[FONS 撤回] 用户已撤回以下补充，若尚未执行请跳过：";
+const PRE_INJECTION_MARKER = /^The following system message was injected by a PreInvocation hook:\r?\n/;
+const STOP_INJECTION_MARKER = "Stop hook blocked termination: ";
+const DELIVERY_ITEM_TOKEN = /^\d+\. .+ \[FONS:([a-f0-9]{8})\]$/s;
+const SYSTEM_TAG_OPEN = /^(?:The following is a <SYSTEM_MESSAGE>[^\r\n]*\r?\n\r?\n)?<SYSTEM_MESSAGE>\r?\n/;
+const SYSTEM_TAG_CLOSE = /\r?\n<\/SYSTEM_MESSAGE>\s*$/;
 
 function tryParseJson(line) {
   try {
@@ -46,31 +52,122 @@ function isCompletedResponse(entry) {
     entry.status === "DONE" && !entry.tool_calls?.length;
 }
 
-function resolveResponseContent(transcriptPath, response) {
-  if (!response.truncated_fields?.includes("content")) {
-    return typeof response.content === "string" ? response.content : "";
-  }
-  if (!Number.isInteger(response.step_index)) return "";
-
-  const fullPath = path.join(path.dirname(transcriptPath), "transcript_full.jsonl");
-  const fullResponse = readJsonLines(fullPath).findLast((entry) =>
-    isCompletedResponse(entry) && entry.step_index === response.step_index &&
-    entry.created_at === response.created_at && !entry.truncated_fields?.includes("content")
-  );
-  const content = fullResponse?.content;
-  return typeof content === "string" ? content : "";
+function isDeliverySystemStep(entry) {
+  return entry?.type === "SYSTEM_MESSAGE" && entry.status === "DONE" &&
+    (entry.source === "SYSTEM_SDK" || entry.source === "SYSTEM");
 }
 
-function readTurnAcknowledgments(transcriptPath, statePath) {
-  if (!transcriptPath || !Object.keys(readJson(statePath).delivered ?? {}).length) return new Set();
-  const steps = readJsonLines(transcriptPath);
+function indexFullSteps(transcriptPath) {
+  const byIndex = new Map();
+  for (const step of readJsonLines(path.join(path.dirname(transcriptPath), "transcript_full.jsonl"))) {
+    if (!isDeliverySystemStep(step) && !isCompletedResponse(step)) continue;
+    if (step.truncated_fields?.includes("content")) continue;
+    const entries = byIndex.get(step.step_index) ?? [];
+    entries.push(step);
+    byIndex.set(step.step_index, entries);
+  }
+  return byIndex;
+}
+
+function createStepContentReader(transcriptPath) {
+  let byIndex;
+  return (step) => {
+    let content = step.content;
+    if (step.truncated_fields?.includes("content")) {
+      if (!Number.isInteger(step.step_index)) return "";
+      byIndex ??= indexFullSteps(transcriptPath);
+      const entry = byIndex.get(step.step_index)?.findLast((candidate) =>
+        candidate.source === step.source && candidate.type === step.type && candidate.created_at === step.created_at
+      );
+      content = entry?.content;
+    }
+    return typeof content === "string" ? content : "";
+  };
+}
+
+function unwrapSystemPayload(content, source) {
+  const open = SYSTEM_TAG_OPEN.exec(content);
+  let body = content;
+  if (open) {
+    const afterOpen = content.slice(open[0].length);
+    const close = SYSTEM_TAG_CLOSE.exec(afterOpen);
+    if (!close) return null;
+    body = afterOpen.slice(0, close.index);
+  }
+  if (source === "SYSTEM_SDK") {
+    const match = PRE_INJECTION_MARKER.exec(body);
+    return match ? body.slice(match[0].length) : null;
+  }
+  return body.startsWith(STOP_INJECTION_MARKER) ? body.slice(STOP_INJECTION_MARKER.length) : null;
+}
+
+function isDeliveryHeader(line, source) {
+  if (source === "SYSTEM_SDK") return line === "[FONS]" || line === NO_WORKSPACE_PRE_HEADER;
+  return line === STOP_HEADER;
+}
+
+function extractDeliveryTokens(content, source) {
+  const payload = unwrapSystemPayload(content, source);
+  if (!payload) return [];
+  const [first, second = ""] = payload.split(/\r?\n\r?\n/, 2);
+  const delivery = first.startsWith(RETRACTION_HEADER) ? second : first;
+  const [header, ...rows] = delivery.split(/\r?\n/);
+  if (!isDeliveryHeader(header, source)) return [];
+  return rows.map((line) => DELIVERY_ITEM_TOKEN.exec(line)?.[1]).filter(Boolean);
+}
+
+function deliveredAckTokens(statePath) {
+  const delivered = readJson(statePath).delivered ?? {};
+  return new Set(Object.values(delivered).map((entry) => entry?.ackToken).filter(Boolean));
+}
+
+function indexDeliveryAnchors(steps, pendingTokens, readContent) {
+  const anchors = new Map();
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (!isDeliverySystemStep(step)) continue;
+    for (const token of extractDeliveryTokens(readContent(step), step.source)) {
+      if (pendingTokens.has(token)) anchors.set(token, i);
+    }
+  }
+  return anchors;
+}
+
+function readUnanchoredTurnTokens(steps, readContent) {
   const userIndex = steps.findLastIndex((step) => step?.type === "USER_INPUT");
   if (userIndex < 0) return new Set();
-
   const response = steps.slice(userIndex + 1).findLast((step) => step?.type === "PLANNER_RESPONSE");
   if (!isCompletedResponse(response)) return new Set();
+  return extractAckTokensFromText(readContent(response));
+}
 
-  return extractAckTokensFromText(resolveResponseContent(transcriptPath, response));
+function readAnchoredTokens(steps, anchors, readContent) {
+  const found = new Set();
+  const earliest = Math.min(...anchors.values());
+  for (let i = earliest + 1; i < steps.length && found.size < anchors.size; i++) {
+    const step = steps[i];
+    if (!isCompletedResponse(step)) continue;
+    for (const token of extractAckTokensFromText(readContent(step))) {
+      if (anchors.has(token) && i > anchors.get(token)) found.add(token);
+    }
+  }
+  return found;
+}
+
+function readAcknowledgments(transcriptPath, statePath) {
+  if (!transcriptPath) return new Set();
+  const pendingTokens = deliveredAckTokens(statePath);
+  if (!pendingTokens.size) return new Set();
+
+  const steps = readJsonLines(transcriptPath);
+  const readContent = createStepContentReader(transcriptPath);
+  const anchors = indexDeliveryAnchors(steps, pendingTokens, readContent);
+  const found = readAnchoredTokens(steps, anchors, readContent);
+  if (anchors.size === pendingTokens.size) return found;
+  for (const token of readUnanchoredTurnTokens(steps, readContent)) {
+    if (pendingTokens.has(token) && !anchors.has(token)) found.add(token);
+  }
+  return found;
 }
 
 function toSlashPath(filePath) {
@@ -111,7 +208,7 @@ function formatMessages(result, attachmentPaths, sessionId) {
   const messages = [];
   if (result.retractions.length) {
     const text = result.retractions.map((retracted) => formatRetractedIdea(retracted, sessionId)).join("\n");
-    messages.push("[FONS 撤回] 用户已撤回以下补充，若尚未执行请跳过：\n" + text);
+    messages.push(RETRACTION_HEADER + "\n" + text);
   }
   if (result.deliveries.length) {
     const deliveryHeader = result.sendAckHint ? NO_WORKSPACE_PRE_HEADER : "[FONS]";
@@ -193,11 +290,13 @@ function shouldRunPoolEvent(paths, event) {
 }
 
 function preparePoolEvent(input, paths) {
-  if (input.hookEventName !== "Stop") return { kind: "delivery" };
+  const ackTokens = readAcknowledgments(input.transcriptPath, paths.state);
+  if (input.hookEventName !== "Stop") return { kind: "delivery", ackTokens };
   return {
     kind: "stop",
+    settleOnly: input.fullyIdle === false,
     continuationActive: input.continuationActive,
-    ackTokens: readTurnAcknowledgments(input.transcriptPath, paths.state),
+    ackTokens,
   };
 }
 
@@ -210,6 +309,7 @@ function handleSessionEvent(input, context, fallback) {
   if (event === "SessionStart" || !shouldRunPoolEvent(paths, event)) return fallback;
 
   const request = preparePoolEvent(input, paths);
+  if (request.settleOnly && !request.ackTokens.size) return fallback;
   const policy = {
     ...standardPoolPolicy({ appData: context.appData }),
     rotateTokenOnStopRetry: true,
@@ -230,7 +330,7 @@ export function evaluateAntigravityHook(input, scopeMode) {
   const event = input.hookEventName;
   const fallback = event === "Stop" ? { decision: "allow" } : {};
   if (!HOOK_EVENTS.has(event)) return fallback;
-  if (event === "Stop" && (input.terminationReason !== "NO_TOOL_CALL" || input.fullyIdle === false)) return fallback;
+  if (event === "Stop" && input.terminationReason !== "NO_TOOL_CALL") return fallback;
   const context = resolveHookContext(input, scopeMode);
   if (!context) return fallback;
   return withLockFallback(() => handleSessionEvent(input, context, fallback), fallback);

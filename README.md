@@ -90,8 +90,8 @@ Fons 将收件箱解析（`scripts/fons-inbox.mjs`）、状态账本（`scripts/
 
 - **Antigravity（`adapters/antigravity.mjs`）**
   - `SessionStart`：登记当前会话与工作区（或无工作区作用域）绑定关系；空会话零项目文件落盘，空箱时引导脚本短路退出，并遵循 `<appData>/fons/config.json` 中的自动挂载与工作区启停规则。
-  - `PreInvocation`：将蓄水到期条目与待发撤回合并注入下一次模型调用；由全局 `fons-pool` 接管的会话仅在首次投递时附带极简回执提示，并将无工作区附件按需镜像至会话 `artifactDir/fons-attachments/` 供沙箱读取；若项目已单独挂载本地插件（`.agents/plugins/fons` 或 `.agents/plugins.json`），全局 Hook 自动让位防重。
-  - `Stop`：读取 `transcript.jsonl`（内容截断时自动回查 `transcript_full.jsonl`）本轮回复末行的 `[FONS_ACK: ...]` 自动回写 `【√】 `；若有未确认或未处于编辑暂缓的待投递条目，自动兜底续跑（最多 2 次）。
+  - `PreInvocation`：在存在未结清投递时先静默核销已有有效 `[FONS_ACK: ...]`，再将蓄水到期条目与待发撤回合并注入下一次模型调用；由全局 `fons-pool` 接管的会话仅在首次投递时附带极简回执提示，并将无工作区附件按需镜像至会话 `artifactDir/fons-attachments/` 供沙箱读取；若项目已单独挂载本地插件（`.agents/plugins/fons` 或 `.agents/plugins.json`），全局 Hook 自动让位防重。
+  - `Stop` 在 `NO_TOOL_CALL` 收尾时从 `transcript.jsonl` 读取对应投递之后已完成回复末行的 `[FONS_ACK: ...]`，自动回写 `【√】 `。内容截断时回查 `transcript_full.jsonl`。若日志中找不到某个令牌的投递记录，两个 Hook 都只从最近一次用户输入后的最后一条模型答复读取该令牌的回执。后台任务运行时仅核销并放行。空闲收尾时若仍有未确认或未处于编辑暂缓的待投递条目，自动兜底续跑（最多 2 次）。
 - **Codex（`adapters/codex.mjs`）**
   - `SessionStart`：登记主线程并绑定 rollout 日志锚点（`resume` 时支持安全重绑），自动忽略子代理（Subagent）会话，并遵循工作区启停规则。
   - `UserPromptSubmit` / `PostToolUse`：在用户提交与工具执行完成后，将蓄水到期条目与待发撤回作为 `additionalContext` 合并注入。
